@@ -134,6 +134,8 @@ pytest -q
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE). Do what you like with it; it comes with no
-warranty, and given the warning at the top of this file, that disclaimer is
-meant sincerely rather than as boilerplate.
+Public domain, via [the Unlicense](LICENSE). No copyright is claimed and no
+attribution is required — copy it, change it, sell it, do whatever you like.
+
+It comes with no warranty, and given the warning at the top of this file, that
+disclaimer is meant sincerely rather than as boilerplate.
