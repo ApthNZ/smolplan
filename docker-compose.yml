@@ -1,0 +1,38 @@
+# There is no authentication in front of this. Anything that can reach the
+# published port can edit the plan, which is fine for a single-user toy on a
+# trusted network and would not be fine for anything else. See SECURITY.md.
+#
+# The published port defaults to 8107; set SMOLPLAN_PORT to change it. To keep
+# it to this machine only, use "127.0.0.1:${SMOLPLAN_PORT:-8107}:8000".
+services:
+  smolplan:
+    build: .
+    container_name: smolplan
+    ports:
+      - "${SMOLPLAN_PORT:-8107}:8000"
+    # The image's own user is uid 10001, but the SQLite file lives on a bind
+    # mount owned by the host user, so run as that user rather than chowning a
+    # host directory. Change to match your own uid:gid, or drop the line and
+    # chown ./data to 10001 instead.
+    user: "1000:1000"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    healthcheck:
+      # /health opens the database, so a container that cannot read or write
+      # its volume fails the check rather than reporting green while every
+      # write 500s.
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    labels:
+      # Locally built image, not a pulled one — watchtower has nothing to do here.
+      com.centurylinklabs.watchtower.enable: 'false'

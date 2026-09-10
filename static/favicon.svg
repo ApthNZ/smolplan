@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- smolplan: three ranked bars on a Monokai ground. Green fits, pink does
+       not, and the third sits further out — the portfolio view in miniature.
+       Bars are 6 units tall so they still read at 16px in a tab strip. -->
+  <rect width="32" height="32" rx="7" fill="#272822"/>
+  <rect x="5"  y="4"  width="17" height="6" rx="3" fill="#A6E22E"/>
+  <rect x="9"  y="13" width="12" height="6" rx="3" fill="#F92672"/>
+  <rect x="7"  y="22" width="20" height="6" rx="3" fill="#66D9EF"/>
+</svg>

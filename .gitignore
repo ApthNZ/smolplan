@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Test output
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
+
+# Security - sensitive file patterns
+*.key
+*.pem
+*.p12
+credentials*
+secrets*
+
+# Application data
+*.db
+*.db-wal
+*.db-shm
+data/
+
+# Local AI-assistant context, not part of the project
+CLAUDE_LOCAL.md

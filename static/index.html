@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>smolplan</title>
+<link rel="icon" href="/static/favicon.png" sizes="32x32">
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header>
+  <h1>smolplan</h1>
+  <nav id="tabs">
+    <button data-view="portfolio" class="on">Portfolio</button>
+    <button data-view="heatmap">Capacity</button>
+    <button data-view="supply">Supply and reserves</button>
+    <button data-view="settings">Settings</button>
+  </nav>
+  <span id="clock" class="clock"></span>
+</header>
+
+<main id="view"></main>
+
+<aside id="drawer" hidden>
+  <button id="drawer-close" title="Close">&times;</button>
+  <div id="drawer-body"></div>
+</aside>
+
+<div id="toast" hidden></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
