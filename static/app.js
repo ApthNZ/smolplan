@@ -37,11 +37,21 @@ const mIndex = (m) => {
   const [y, mo] = m.split("-").map(Number);
   return y * 12 + mo - 1;
 };
+const mFrom = (i) =>
+  `${String(Math.floor(i / 12)).padStart(4, "0")}-${String((i % 12) + 1).padStart(2, "0")}`;
+const monthAdd = (month, n) => mFrom(mIndex(month) + n);
+
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 function monthLabel(m) {
   const [year, mo] = m.split("-");
   const name = MONTHS[Number(mo) - 1];
   return Number(mo) === 1 ? `${name} ${year.slice(2)}` : name;
+}
+
+// Unambiguous form, for dropdowns and tooltips where there is room.
+function monthLong(m) {
+  const [year, mo] = m.split("-");
+  return `${MONTHS[Number(mo) - 1]} ${year}`;
 }
 
 function toast(message) {
@@ -470,12 +480,23 @@ function openEditor(initiative) {
 
   const gridBox = el("div", { class: "scroll-x" });
 
+  // Demand is stored as an offset from the start month, so that moving the
+  // start moves the whole profile. The grid shows the months those offsets
+  // currently land on, because "+3" means nothing to a reader.
+  const columnMonth = (offset) => monthAdd(startSelect.value, offset);
+
   function drawGrid() {
     const head = el(
       "tr",
       {},
       el("th", { class: "team" }, "Team"),
-      Array.from({ length: columns }, (_, offset) => el("th", {}, `+${offset}`))
+      Array.from({ length: columns }, (_, offset) =>
+        el(
+          "th",
+          { title: `${monthLong(columnMonth(offset))} — month ${offset + 1} of the initiative` },
+          monthLabel(columnMonth(offset))
+        )
+      )
     );
     const body = state.teams.map((team) =>
       el(
@@ -507,9 +528,28 @@ function openEditor(initiative) {
   drawGrid();
 
   const fillTeam = el("select", {}, state.teams.map((t) => el("option", { value: t.id }, t.name)));
-  const fillFrom = el("input", { type: "number", min: "0", value: "0", style: "width:52px" });
-  const fillTo = el("input", { type: "number", min: "0", value: String(columns - 1), style: "width:52px" });
+  const fillFrom = el("select", {});
+  const fillTo = el("select", {});
   const fillValue = el("input", { type: "number", step: "0.05", min: "0", value: "0.50", style: "width:62px" });
+
+  // Rebuilt whenever the start month or the column count changes, so the
+  // dropdowns always name the months actually on screen.
+  function drawFillRange() {
+    const from = Number(fillFrom.value || 0);
+    const to = fillTo.value === "" ? columns - 1 : Number(fillTo.value);
+    const options = (offset) =>
+      Array.from({ length: columns }, (_, o) =>
+        el("option", o === offset ? { value: o, selected: true } : { value: o }, monthLong(columnMonth(o)))
+      );
+    fillFrom.replaceChildren(...options(Math.min(from, columns - 1)));
+    fillTo.replaceChildren(...options(Math.min(to, columns - 1)));
+  }
+  drawFillRange();
+
+  startSelect.addEventListener("change", () => {
+    drawGrid();
+    drawFillRange();
+  });
 
   async function save() {
     const lines = [...grid.entries()].map(([key, value]) => {
@@ -550,20 +590,33 @@ function openEditor(initiative) {
     field("Owner", ownerInput),
     field("Start month", startSelect),
     field("Notes", notesInput),
-    el("h3", {}, "Demand, FTE per team by month offset"),
+    el("h3", {}, "Demand, FTE per team per month"),
+    el(
+      "p",
+      { class: "muted", style: "margin:0 0 6px" },
+      "Months follow the start month. Move the initiative and the whole profile moves with it."
+    ),
     gridBox,
     el(
       "div",
-      { class: "row", style: "margin-top:8px" },
-      el("span", { class: "muted" }, "Set"),
-      fillTeam,
-      el("span", { class: "muted" }, "to"),
-      fillValue,
-      el("span", { class: "muted" }, "FTE for offsets"),
-      fillFrom,
-      el("span", { class: "muted" }, "to"),
-      fillTo,
+      { style: "margin-top:8px" },
       el(
+        "div",
+        { class: "row" },
+        el("span", { class: "muted" }, "Set"),
+        fillTeam,
+        el("span", { class: "muted" }, "to"),
+        fillValue,
+        el("span", { class: "muted" }, "FTE")
+      ),
+      el(
+        "div",
+        { class: "row", style: "margin-top:5px" },
+        el("span", { class: "muted" }, "from"),
+        fillFrom,
+        el("span", { class: "muted" }, "to"),
+        fillTo,
+        el(
         "button",
         {
           onclick: () => {
@@ -578,17 +631,19 @@ function openEditor(initiative) {
             drawGrid();
           },
         },
-        "Fill row"
-      ),
-      el(
-        "button",
-        {
-          onclick: () => {
-            columns = Math.min(24, columns + 3);
-            drawGrid();
+          "Apply"
+        ),
+        el(
+          "button",
+          {
+            onclick: () => {
+              columns = Math.min(24, columns + 3);
+              drawGrid();
+              drawFillRange();
+            },
           },
-        },
-        "+3 months"
+          "+3 months"
+        )
       )
     ),
     el(
@@ -963,6 +1018,103 @@ function renderSettings() {
   );
 }
 
+// --- rules -------------------------------------------------------------------
+
+const RULES = [
+  ["R1", "Plan in whole months, and store FTE as integer hundredths.",
+   "0.50 FTE is held as 50. Ten hundredths plus twenty hundredths is exactly thirty, where 0.1 + 0.2 in floating point is not."],
+  ["R2", "Reserves are taken before any initiative.",
+   "Business as usual and unplanned work come off the top, so what initiatives compete for is what is genuinely left."],
+  ["R3", "Initiatives are allocated in strict rank order.",
+   "Rank is the only priority signal. There is no scoring, no weighting, and nothing schedules itself."],
+  ["R4", "All or nothing.",
+   "An initiative is green only if every month it needs is fully met, for every team it needs. Otherwise it is red."],
+  ["R5", "Higher rank always wins.",
+   "Adding or re-ranking an initiative can turn a lower-ranked one red, including work already under way. That displacement is what the tool exists to show."],
+  ["R6", "There is no pausing. Work that stops is split.",
+   "Shorten the initiative to the last month delivered and create a new one for the remainder. A gap in the middle would hide the fact that it stopped."],
+  ["R7", "Only the current and future months are evaluated.",
+   "The past is settled. An initiative lying entirely behind the current month can never turn red."],
+  ["R8", "A start cannot be moved into the past.",
+   "Anything can be pushed out, including work that has already begun. Nothing can be dragged behind the clock."],
+  ["R9", "A month with no supply figure counts as zero, but is labelled differently.",
+   "\u201cNo supply data\u201d means nobody has said what that team has. That is not the same as saying they have none, and a shortfall tells you which it is."],
+  ["R10", "Reserves may exceed supply.",
+   "The cell is flagged and available capacity clamps to zero. Negative capacity is not a thing."],
+];
+
+const SURPRISES = [
+  ["A red initiative consumes nothing at all.",
+   "It is not half-started and quietly holding capacity. Lower-ranked work fits around it, so the plan shows what would actually be delivered rather than a queue."],
+  ["Re-ranking can turn green work red.",
+   "That is the point. The cost of a new priority is made visible rather than absorbed silently."],
+  ["Demand travels with the start month.",
+   "The demand grid is relative to the start, so moving an initiative moves its whole profile with it."],
+  ["The months that shade while you drag ignore lower-ranked work.",
+   "They show where this initiative would be green given everything ranked above it. What it would displace below only appears once you drop it."],
+  ["Nothing is scheduled automatically.",
+   "smolplan shows where things fit and what breaks. A human decides."],
+];
+
+function renderRules() {
+  const status = (cls, label, text) =>
+    [el("span", { class: `chip ${cls}` }, cls === "red" ? "\u25b2 " + label : label),
+     el("span", { class: "muted" }, text)];
+
+  return el(
+    "div",
+    { class: "prose" },
+    el("h2", {}, "What this is"),
+    el("p", { class: "lead" },
+      "smolplan answers three questions about a portfolio: what can be delivered, " +
+      "when it can be delivered, and what gets displaced when priorities change. " +
+      "It plans in whole months, against teams rather than named people."),
+
+    el("h2", {}, "How a plan is worked out"),
+    el("ol", {},
+      el("li", {}, "Each team has an FTE supply for each month, set under ",
+        el("b", {}, "Supply and reserves"), "."),
+      el("li", {}, "Reserves come off the top before anything else is considered."),
+      el("li", {}, "Initiatives are allocated in rank order, starting from rank 1."),
+      el("li", {}, "Any initiative that cannot be ", el("b", {}, "fully"),
+        " staffed turns red and consumes nothing."),
+      el("li", {}, "You drag it to a month where it fits, or change what sits above it.")),
+
+    el("h2", {}, "What the colours mean"),
+    el("div", { class: "statuses" },
+      status("green", "Green", "Fully staffed in every evaluated month, for every team it needs."),
+      status("red", "Red", "Short in at least one month. Consumes no capacity anywhere until it fits."),
+      status("past", "Past", "Lies entirely behind the current month, so it is not evaluated."),
+      status("archived", "Archived", "Set aside. Excluded from the plan entirely.")),
+    el("p", { class: "muted" },
+      "Red bars are hatched and carry a \u25b2 as well as being red, so status never depends on colour alone."),
+
+    el("h2", {}, "The rules"),
+    el("table", { class: "rules" },
+      el("tbody", {}, RULES.map(([id, what, why]) =>
+        el("tr", {},
+          el("td", { class: "id" }, id),
+          el("td", {}, el("b", {}, what), el("span", { class: "why" }, why)))))),
+
+    el("h2", {}, "Things that catch people out"),
+    el("ul", {}, SURPRISES.map(([what, why]) =>
+      el("li", {}, el("b", {}, what), " ", el("span", { class: "muted" }, why)))),
+
+    el("h2", {}, "Two practical notes"),
+    el("p", {},
+      el("b", {}, "The current month drives everything. "),
+      el("span", { class: "muted" },
+        "It comes from the clock, and Settings has an override so you can push time " +
+        "around and watch the rules behave. An override is flagged in the header \u2014 " +
+        "blank it to go back to the real date.")),
+    el("p", {},
+      el("b", {}, "There is no login. "),
+      el("span", { class: "muted" },
+        "Anyone who can open this page can change the plan, and changes are not " +
+        "attributed to anyone. Treat it as a shared whiteboard.")),
+  );
+}
+
 // --- shell -------------------------------------------------------------------
 
 function render() {
@@ -970,6 +1122,7 @@ function render() {
     portfolio: renderPortfolio,
     heatmap: renderHeatmap,
     supply: renderSupply,
+    rules: renderRules,
     settings: renderSettings,
   };
   $("#view").replaceChildren(views[view]());

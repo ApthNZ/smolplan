@@ -213,5 +213,33 @@ td.grid-in input { width: 56px; }
 }
 
 .muted { color: var(--muted); }
+
+/* --- rules ------------------------------------------------------------- */
+
+.prose { max-width: 76ch; }
+.prose p { margin: 0 0 10px; }
+.prose > h2 { margin-top: 22px; font-size: 13px; }
+.prose > h2:first-child { margin-top: 0; }
+.prose ol, .prose ul { margin: 0 0 12px; padding-left: 20px; }
+.prose li { margin-bottom: 5px; }
+.prose .lead { color: var(--muted); margin-bottom: 16px; }
+
+.rules { border-collapse: collapse; width: 100%; background: var(--panel); }
+.rules td { border: 1px solid var(--line-soft); padding: 6px 9px; text-align: left; vertical-align: top; }
+.rules td.id { width: 34px; font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
+.rules td b { font-weight: 600; }
+.rules td .why { display: block; color: var(--muted); margin-top: 2px; }
+
+.statuses { display: grid; grid-template-columns: auto 1fr; gap: 6px 10px; align-items: baseline; margin-bottom: 12px; }
+.statuses .chip {
+  display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px;
+  border: 1px solid; border-radius: 4px; font-size: 11px; white-space: nowrap;
+}
+.chip.green { background: var(--green-bg); border-color: var(--green); color: var(--green); }
+.chip.red {
+  background: var(--red-bg); border-color: var(--red); color: var(--red);
+  background-image: repeating-linear-gradient(45deg, transparent 0 4px, rgba(179,38,30,.25) 4px 8px);
+}
+.chip.past, .chip.archived { background: var(--grey-bg); border-color: var(--line); color: var(--muted); }
 .status-green { color: var(--green); }
 .status-red { color: var(--red); }
