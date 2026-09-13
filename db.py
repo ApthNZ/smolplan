@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS initiative (
     name                  TEXT NOT NULL,
     "rank"                INTEGER NOT NULL,
     start_month           TEXT NOT NULL,
+    reference             TEXT,
     owner                 TEXT NOT NULL DEFAULT '',
     notes                 TEXT NOT NULL DEFAULT '',
     archived              INTEGER NOT NULL DEFAULT 0,
@@ -75,6 +76,14 @@ def connect(path: str | None = None) -> sqlite3.Connection:
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
     _drop_requested_start_month(conn)
+    _add_reference(conn)
+    # Partial index: an initiative created by hand has no reference, and any
+    # number of them may coexist. Imported ones are unique on it, which is what
+    # lets a re-import update in place rather than duplicate.
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS initiative_reference ON initiative(reference) "
+        "WHERE reference IS NOT NULL AND reference != ''"
+    )
     for key, value in DEFAULT_SETTINGS.items():
         conn.execute("INSERT OR IGNORE INTO setting (key, value) VALUES (?, ?)", (key, value))
     conn.commit()
@@ -89,6 +98,14 @@ def _drop_requested_start_month(conn: sqlite3.Connection) -> None:
     columns = [r["name"] for r in conn.execute("PRAGMA table_info(initiative)")]
     if "requested_start_month" in columns:
         conn.execute("ALTER TABLE initiative DROP COLUMN requested_start_month")
+        conn.commit()
+
+
+def _add_reference(conn: sqlite3.Connection) -> None:
+    """Add the reference column to a database created before CSV import existed."""
+    columns = [r["name"] for r in conn.execute("PRAGMA table_info(initiative)")]
+    if "reference" not in columns:
+        conn.execute("ALTER TABLE initiative ADD COLUMN reference TEXT")
         conn.commit()
 
 
@@ -142,7 +159,7 @@ def load_engine_inputs(conn) -> dict:
     initiatives = [
         dict(r)
         for r in conn.execute(
-            'SELECT id, name, "rank", start_month, owner, '
+            'SELECT id, name, "rank", start_month, reference, owner, '
             "notes, archived FROM initiative ORDER BY \"rank\""
         )
     ]

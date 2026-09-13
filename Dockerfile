@@ -5,7 +5,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py db.py engine.py ./
+# Every module, not a list of names — a new module must not be able to be
+# forgotten here and crash the container on import.
+COPY *.py ./
 COPY static/ ./static/
 
 # The database lives on a volume so the image stays disposable.

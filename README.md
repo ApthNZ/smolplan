@@ -20,7 +20,7 @@ A small capacity planner. Given ranked initiatives and finite team capacity, it
 answers three questions: what can we deliver, when can we deliver it, and what
 gets displaced when priorities change?
 
-![The portfolio view: a ranked list of initiatives beside a monthly timeline, with one initiative red because it cannot be staffed](docs/portfolio.png)
+![The portfolio view: a ranked list of initiatives beside a monthly timeline, with capacity rows above and below showing supply, what reserves take, and what is left](docs/portfolio.png)
 
 The loop is deliberately simple:
 
@@ -54,6 +54,61 @@ The database is created on first run and seeded with a demo anchored on the
 current month: teams SOC and GRC, initiatives A, B and C, and B short of GRC
 capacity so there's a red bar to play with immediately. Settings → *Reset to
 fixture* puts it back.
+
+## Importing from a spreadsheet
+
+Settings has a CSV import, for pulling initiatives out of an issue tracker
+rather than typing them in:
+
+```
+InitiativeName,Reference,StartMonth,EndMonth,SOC,GRC
+Project123,PRO-001,2026-09,2026-12,1,0.5
+ProjectABC,PRO-002,2026-10,2027-03,2,0.25
+```
+
+Every column that isn't one of the four known headers is a team name, and its
+value is that team's FTE for **every** month from start to end inclusive. A
+blank cell means that team isn't needed. Column order and capitalisation don't
+matter, because columns are matched by header name.
+
+Rows are matched on `Reference` — an issue key, typically — so re-importing an
+updated export **updates those initiatives in place** rather than duplicating
+them. Rank and archived state are left alone: the file says what the work is,
+not where it sits in your plan.
+
+Two deliberate departures from the rules above:
+
+- **A start in the past is accepted here**, though R8 forbids it everywhere
+  else. An export of work already under way is the normal case, and R7 means
+  only the remaining months get evaluated.
+- **Nothing is ever deleted.** An initiative missing from the file is left
+  exactly as it was.
+
+If anything is wrong — an unknown team, a malformed month, an end before a
+start, a duplicated reference — the whole file is rejected, nothing is written,
+and you get every problem at once rather than one per attempt.
+
+## What's on screen
+
+- **Portfolio** — the ranked list beside a monthly timeline. Drag a row to
+  re-rank, drag a bar to move a start, and the months where it would fit shade
+  while you drag. Capacity rows bracket the plan: supply, what the reserves
+  take, and what is left after the green initiatives — which is the headroom
+  you can actually move something into. Tags on each row show which teams it
+  draws on, and clicking one filters the view to that team.
+- **Team capacity** — every team by month, shaded green at idle through to red
+  when full. Click a cell to see exactly what is consuming it.
+- **Supply and reserves** — editable grids with a bulk fill, e.g. set SOC to
+  2.00 FTE from one month to another. Leaving the FTE box empty clears those
+  months, which means "no supply data", not zero.
+- **Rules** — the allocation rules, what each colour means, and the behaviour
+  that surprises people.
+- **Settings** — the horizon, a current-month override for experimenting, and
+  the CSV import.
+
+The month range in the header narrows all three data views at once. It only
+changes what you see: the plan is always worked out over the whole horizon, so
+hiding a month cannot change a status.
 
 ## The rules
 
@@ -95,7 +150,7 @@ shades the timeline while you drag a bar.
 There is no build step. The frontend is about 900 lines of dependency-free
 JavaScript that renders from a single state object fetched after every change.
 
-![The capacity heatmap: teams as rows, months as columns, showing utilisation and free FTE](docs/heatmap.png)
+![The team capacity view: teams as rows, months as columns, each cell shaded green to red by utilisation and showing the free FTE](docs/heatmap.png)
 
 ## Design notes
 

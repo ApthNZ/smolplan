@@ -13,17 +13,19 @@
   <h1>smolplan</h1>
   <nav id="tabs">
     <button data-view="portfolio" class="on">Portfolio</button>
-    <button data-view="heatmap">Capacity</button>
+    <button data-view="heatmap">Team capacity</button>
     <button data-view="supply">Supply and reserves</button>
     <button data-view="rules">Rules</button>
     <button data-view="settings">Settings</button>
   </nav>
+  <span id="range" class="range"></span>
   <span id="clock" class="clock"></span>
 </header>
 
 <main id="view"></main>
 
 <aside id="drawer" hidden>
+  <button id="drawer-expand" title="Expand">&#10530;</button>
   <button id="drawer-close" title="Close">&times;</button>
   <div id="drawer-body"></div>
 </aside>

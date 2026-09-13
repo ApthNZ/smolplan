@@ -6,6 +6,9 @@ let state = null;
 let view = "portfolio";
 let showArchived = false;
 let teamFilter = null; // team id, or null for every team
+let importResult = null; // summary of the last successful import
+let monthFrom = null; // narrowed display window; null means the whole horizon
+let monthTo = null;
 
 // --- helpers -----------------------------------------------------------------
 
@@ -93,6 +96,19 @@ function drawer(...content) {
 }
 const closeDrawer = () => ($("#drawer").hidden = true);
 
+// The months on screen. Narrowing this is a view filter and nothing more: the
+// engine still allocates over the full horizon, so hiding months can never
+// change a status. That is why the range lives here and not in the API.
+function visibleMonths() {
+  const all = state.months;
+  if (!all.length) return all;
+  const first = monthFrom && all.includes(monthFrom) ? all.indexOf(monthFrom) : 0;
+  const last = monthTo && all.includes(monthTo) ? all.indexOf(monthTo) : all.length - 1;
+  return first <= last ? all.slice(first, last + 1) : all;
+}
+
+const rangeIsNarrowed = () => visibleMonths().length < state.months.length;
+
 const teamName = (id) => (state.teams.find((t) => t.id === id) || {}).name || `Team ${id}`;
 const cellAt = (teamId, month) => state.cells[`${teamId}|${month}`];
 
@@ -145,7 +161,7 @@ function renderPortfolio() {
   // A team can be deleted while its filter is active.
   if (teamFilter !== null && !state.teams.some((t) => t.id === teamFilter)) teamFilter = null;
 
-  const months = state.months;
+  const months = visibleMonths();
   const width = months.length * COL;
   const visible = state.initiatives.filter(
     (i) => (showArchived || !i.archived) && drawsOnFilteredTeam(initiativeTeams(i))
@@ -173,6 +189,80 @@ function renderPortfolio() {
         )
       )
     )
+  );
+
+  // Supply, then reserves, then what is left. The last of those is the ceiling
+  // an initiative has to fit under before any other initiative competes for it,
+  // which is what makes it useful when deciding where something can move.
+  const includedTeams = state.teams.filter((t) => teamFilter === null || t.id === teamFilter);
+
+  // `usedFor` is what has been consumed by the time this row is reached, and
+  // drives the shading: green while there is room, red once there is none.
+  // The same ramp as the capacity heatmap, so the two views agree.
+  function capacityRow(label, hint, valueFor, usedFor, tall) {
+    side.append(
+      el(
+        "div",
+        { class: `side-row summary${tall ? " tall" : ""}`, title: hint },
+        el("span", { class: "rank" }, "—"),
+        el("span", { class: "name" }, label),
+        tagStrip(includedTeams.map((t) => t.id))
+      )
+    );
+    const row = el("div", { class: `tl-row${tall ? " tall" : ""}` });
+    const grid = el("div", { class: "grid" });
+    for (const month of months) {
+      let total = 0;
+      let supply = 0;
+      let used = 0;
+      let known = false;
+      for (const team of includedTeams) {
+        const cell = cellAt(team.id, month);
+        if (!cell) continue;
+        if (cell.has_supply_row) known = true;
+        total += valueFor(cell);
+        supply += cell.supply;
+        used += usedFor ? usedFor(cell) : 0;
+      }
+      const over = supply === 0 && used > 0;
+      const fraction = supply ? used / supply : over ? 1 : 0;
+      const shade = usedFor && known ? utilisationHue(fraction) : null;
+      const percent = !known ? "—" : over ? ">100%" : `${Math.round(fraction * 100)}%`;
+
+      grid.append(
+        el(
+          "i",
+          {
+            class: Number(month.slice(5)) === 1 ? "q1" : "",
+            style: shade === null ? "" : `--u:${shade}`,
+            title: tall && known ? `${percent} of supply used, ${fte(total)} left` : "",
+          },
+          // No supply row anywhere is not the same as a supply of zero (R9).
+          tall
+            ? el(
+                "span",
+                { class: "stacked" },
+                el("span", { class: "pct" }, percent),
+                el("span", { class: "amount" }, known ? fte(total) : "")
+              )
+            : el("span", { class: "reserve-cell" }, known ? fte(total) : "—")
+        )
+      );
+    }
+    row.append(grid);
+    track.append(row);
+  }
+
+  const acrossTeams =
+    teamFilter === null && state.teams.length > 1
+      ? " Summed across every team, so it cannot be compared against one team's "
+        + "demand — filter to a team for the figure that actually constrains it."
+      : "";
+
+  capacityRow(
+    "Supply",
+    "Total FTE available before anything is taken out of it." + acrossTeams,
+    (cell) => cell.supply
   );
 
   // Reserves are pinned at the top and cannot be dragged.
@@ -208,10 +298,32 @@ function renderPortfolio() {
     track.append(row);
   }
 
+  capacityRow(
+    "Supply after reserves",
+    "What initiatives compete for: supply minus reserves, clamped at zero (R10). "
+      + "Nothing can fit in a month where this is less than it needs, whatever "
+      + "its rank." + acrossTeams
+      + " Shaded green while there is room and red once the reserves have taken it all.",
+    (cell) => Math.max(0, cell.supply - cell.reserved),
+    (cell) => cell.reserved
+  );
+
   for (const initiative of visible) {
     side.append(sideRow(initiative));
     track.append(timelineRow(initiative, months));
   }
+
+  capacityRow(
+    "Supply after initiatives",
+    "What is still unspent once the green initiatives above have taken their "
+      + "share. Red ones are not counted, because a red initiative consumes "
+      + "nothing (R4) — so this is headroom you can actually plan into."
+      + acrossTeams
+      + " Shaded green while there is room and red once nothing is left.",
+    (cell) => cell.free,
+    (cell) => cell.reserved + cell.allocated,
+    true
+  );
 
   if (!visible.length && !reserves.length) {
     side.append(
@@ -269,7 +381,13 @@ function renderPortfolio() {
         )
       ),
       el("span", { class: "spacer" }),
-      el("span", { class: "muted" }, "Drag a row to re-rank. Drag a bar to move the start.")
+      el(
+        "span",
+        { class: "muted" },
+        teamFilter === null && state.teams.length > 1
+          ? "Supply rows are summed across teams — filter to a team to see what constrains it."
+          : "Drag a row to re-rank. Drag a bar to move the start."
+      )
     ),
     plan,
     el(
@@ -438,7 +556,10 @@ function openShortfalls(initiative) {
       el("dt", {}, "Rank"),
       el("dd", {}, initiative.rank),
       el("dt", {}, "Start"),
-      el("dd", {}, initiative.start_month)
+      el("dd", {}, initiative.start_month),
+      ...(initiative.reference
+        ? [el("dt", {}, "Reference"), el("dd", {}, initiative.reference)]
+        : [])
     ),
     rows.length ? el("h3", {}, "Shortfalls") : null,
     rows.length ? el("ul", {}, rows) : el("p", { class: "muted" }, "No shortfalls."),
@@ -589,6 +710,12 @@ function openEditor(initiative) {
     field("Name", nameInput),
     field("Owner", ownerInput),
     field("Start month", startSelect),
+    data.reference
+      ? field(
+          "Reference (set by import)",
+          el("input", { value: data.reference, disabled: true, title: "Imported rows match on this" })
+        )
+      : null,
     field("Notes", notesInput),
     el("h3", {}, "Demand, FTE per team per month"),
     el(
@@ -687,8 +814,28 @@ function field(label, input) {
 
 // --- capacity heatmap --------------------------------------------------------
 
+// Utilisation 0..1 to a hue. Green (140) through amber to red (0): a straight
+// green-to-red interpolation crosses olive and reads as muddy rather than
+// "getting full". Anything at or over 100% pins to red.
+function utilisationHue(fraction) {
+  const clamped = Math.min(Math.max(fraction, 0), 1);
+  return Math.round(140 - 140 * clamped);
+}
+
+function utilisationLegend() {
+  const steps = [0, 25, 50, 75, 100];
+  return el(
+    "span",
+    { class: "legend-scale" },
+    el("span", { class: "muted" }, "Utilisation"),
+    ...steps.map((pct) =>
+      el("span", { class: "swatch", style: `--u:${utilisationHue(pct / 100)}` }, `${pct}%`)
+    )
+  );
+}
+
 function renderHeatmap() {
-  const months = state.months;
+  const months = visibleMonths();
   const head = el(
     "tr",
     {},
@@ -705,18 +852,33 @@ function renderHeatmap() {
         const cell = cellAt(team.id, month);
         if (!cell) return el("td", {}, "");
         const used = cell.reserved + cell.allocated;
-        const pct = cell.supply ? Math.round((used / cell.supply) * 100) : used ? 999 : 0;
+        // Supply of zero with something drawing on it is over-subscribed, not
+        // a division by zero. Reserves can do that (R10).
+        const over = cell.supply === 0 && used > 0;
+        const pct = cell.supply ? Math.round((used / cell.supply) * 100) : 0;
+
         const classes = ["cell"];
         if (cell.warnings.length) classes.push("warn");
         if (!cell.has_supply_row) classes.push("nodata");
+
         return el(
           "td",
           {
             class: classes.join(" "),
-            title: `${team.name} ${month}`,
+            // Hue carries the load: 140 is green at idle, 0 is red at full.
+            // The numbers stay in the cell, so colour is a second reading of
+            // the same fact rather than the only one.
+            style: cell.has_supply_row ? `--u:${utilisationHue(over ? 1 : pct / 100)}` : "",
+            title: `${team.name} ${month} — ${
+              !cell.has_supply_row
+                ? "no supply data"
+                : over
+                ? "over-subscribed with no supply"
+                : `${pct}% utilised, ${fte(cell.free)} free`
+            }`,
             onclick: () => openCell(team, month),
           },
-          el("span", {}, cell.has_supply_row ? `${pct}%` : "—"),
+          el("span", {}, !cell.has_supply_row ? "—" : over ? ">100%" : `${pct}%`),
           el("span", { class: "free" }, `${fte(cell.free)} free`)
         );
       })
@@ -729,7 +891,9 @@ function renderHeatmap() {
     el(
       "div",
       { class: "toolbar" },
-      el("span", { class: "muted" }, "Utilisation of supply, and free FTE after reserves and green initiatives. Click a cell for the breakdown.")
+      el("span", { class: "muted" }, "Utilisation of supply, and free FTE after reserves and green initiatives. Click a cell for the breakdown."),
+      el("span", { class: "spacer" }),
+      utilisationLegend()
     ),
     el("div", { class: "scroll-x" }, el("table", {}, el("thead", {}, head), el("tbody", {}, rows)))
   );
@@ -888,8 +1052,9 @@ function renderSupply() {
 
 function fillForm(label, hint, submit) {
   const team = el("select", {}, state.teams.map((t) => el("option", { value: t.id }, t.name)));
-  const from = el("input", { value: state.months[0], style: "width:88px" });
-  const to = el("input", { value: state.months[state.months.length - 1], style: "width:88px" });
+  const window = visibleMonths();
+  const from = el("input", { value: window[0], style: "width:88px" });
+  const to = el("input", { value: window[window.length - 1], style: "width:88px" });
   const value = el("input", { type: "number", step: "0.05", min: "0" });
   return el(
     "div",
@@ -924,7 +1089,7 @@ function fillForm(label, hint, submit) {
 }
 
 function monthGrid(read, write) {
-  const months = state.months;
+  const months = visibleMonths();
   const head = el(
     "tr",
     {},
@@ -958,6 +1123,114 @@ function monthGrid(read, write) {
 }
 
 // --- settings ----------------------------------------------------------------
+
+function importPanel() {
+  const teams = state.teams.map((t) => t.name);
+  const sample =
+    ["InitiativeName", "Reference", "StartMonth", "EndMonth", ...teams].join(",") +
+    "\n" +
+    ["Project123", "PRO-001", state.months[0], state.months[Math.min(3, state.months.length - 1)],
+      ...teams.map((_, i) => (i === 0 ? "1" : "0.5"))].join(",");
+
+  const box = el("textarea", {
+    rows: "6",
+    spellcheck: "false",
+    placeholder: "Paste CSV here, or choose a file above",
+    style: "width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px",
+  });
+  const result = el("div", { class: "import-result" });
+  const file = el("input", {
+    type: "file",
+    accept: ".csv,text/csv,text/plain",
+    onchange: (e) => {
+      const chosen = e.target.files && e.target.files[0];
+      if (!chosen) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        box.value = String(reader.result || "");
+        result.replaceChildren(el("p", { class: "muted" }, `Loaded ${chosen.name}. Check it, then import.`));
+      };
+      reader.readAsText(chosen);
+    },
+  });
+
+  async function run() {
+    const csv = box.value.trim();
+    if (!csv) {
+      result.replaceChildren(el("p", { class: "status-red" }, "Nothing to import — paste some CSV or choose a file."));
+      return;
+    }
+    result.replaceChildren(el("p", { class: "muted" }, "Importing…"));
+    try {
+      const response = await fetch("/api/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ csv }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        // Every problem at once, and nothing was written. Keep the pasted text
+        // so it can be corrected rather than re-pasted.
+        const detail = data && data.detail;
+        const problems = (detail && detail.errors) || [String((detail && detail.message) || "Import failed.")];
+        result.replaceChildren(
+          el("p", { class: "status-red" }, (detail && detail.message) || "Import failed."),
+          el("ul", { class: "import-errors" }, problems.map((p) => el("li", {}, p)))
+        );
+        return;
+      }
+      state = data;
+      importResult = data.import;
+      render();
+    } catch (err) {
+      result.replaceChildren(el("p", { class: "status-red" }, err.message));
+    }
+  }
+
+  const summary = [];
+  if (importResult) {
+    const { created, updated, changed } = importResult;
+    summary.push(
+      el("p", { class: "status-green" },
+        `Imported: ${created.length} created, ${updated.length} updated.`),
+      created.length ? el("p", { class: "muted" }, `Created: ${created.join(", ")}`) : null,
+      updated.length ? el("p", { class: "muted" }, `Updated: ${updated.join(", ")}`) : null,
+      changed.length
+        ? el("div", {},
+            el("p", { class: "muted", style: "margin-bottom:4px" }, "Status changed as a result:"),
+            el("ul", { class: "import-errors" }, changed.map((c) =>
+              el("li", {},
+                `${c.name}: `,
+                el("span", { class: `status-${c.from}` }, c.from),
+                " → ",
+                el("span", { class: `status-${c.to}` }, c.to)))))
+        : el("p", { class: "muted" }, "Nothing already in the plan changed colour.")
+    );
+  }
+
+  return el(
+    "div",
+    {},
+    el("p", { class: "muted" },
+      "Create or update initiatives from a spreadsheet or issue-tracker export. " +
+      "Rows are matched on Reference, so importing the same file again updates " +
+      "those initiatives rather than duplicating them."),
+    el("pre", { class: "sample" }, sample),
+    el("ul", { class: "import-notes muted" },
+      el("li", {}, "One column per team, headed with the team name. The value is that team's FTE for every month from StartMonth to EndMonth inclusive."),
+      el("li", {}, "A blank team cell means that team is not needed. Column order and capitalisation do not matter."),
+      el("li", {}, "A start in the past is accepted — only the remaining months are evaluated."),
+      el("li", {}, "New rows are added below everything already in the plan. Nothing is ever deleted or re-ranked."),
+      el("li", {}, "If anything is wrong, the whole file is rejected and you get every problem at once.")),
+    el("div", { class: "row", style: "margin:8px 0" }, file),
+    box,
+    el("div", { class: "row", style: "margin-top:8px" },
+      el("button", { class: "primary", onclick: run }, "Import"),
+      el("button", { onclick: () => { box.value = ""; importResult = null; result.replaceChildren(); } }, "Clear")),
+    ...summary.filter(Boolean),
+    result
+  );
+}
 
 function renderSettings() {
   const horizon = el("input", { type: "number", min: "1", max: "120", value: state.settings.horizon_months });
@@ -999,6 +1272,9 @@ function renderSettings() {
         "Save settings"
       )
     ),
+    el("h3", {}, "Import from CSV"),
+    importPanel(),
+
     el("h3", {}, "Fixture"),
     el(
       "p",
@@ -1088,6 +1364,18 @@ function renderRules() {
       status("archived", "Archived", "Set aside. Excluded from the plan entirely.")),
     el("p", { class: "muted" },
       "Red bars are hatched and carry a \u25b2 as well as being red, so status never depends on colour alone."),
+    el("p", { class: "muted" },
+      "On the Team capacity tab, cells shade from green when a team is idle to " +
+      "red when it is fully used, so constraints stand out at a glance. The " +
+      "percentage and the free FTE are written in every cell, so the colour is " +
+      "a second reading of the same fact rather than the only one. Months with " +
+      "no supply figure are hatched instead of shaded \u2014 unknown is not the " +
+      "same as idle."),
+    el("p", { class: "muted" },
+      "The same ramp shades the capacity rows on the Portfolio tab. Reading " +
+      "down them \u2014 supply, then what is left after reserves, then what is " +
+      "left after the green initiatives \u2014 shows where the room went and " +
+      "where there is still some."),
 
     el("h2", {}, "The rules"),
     el("table", { class: "rules" },
@@ -1100,7 +1388,14 @@ function renderRules() {
     el("ul", {}, SURPRISES.map(([what, why]) =>
       el("li", {}, el("b", {}, what), " ", el("span", { class: "muted" }, why)))),
 
-    el("h2", {}, "Two practical notes"),
+    el("h2", {}, "Three practical notes"),
+    el("p", {},
+      el("b", {}, "The month range at the top only changes what you see. "),
+      el("span", { class: "muted" },
+        "It applies to the portfolio, team capacity and the supply editor at " +
+        "once. Narrowing it never changes a status: the plan is always worked " +
+        "out over the whole horizon, so an initiative short of capacity in a " +
+        "month you have hidden stays red.")),
     el("p", {},
       el("b", {}, "The current month drives everything. "),
       el("span", { class: "muted" },
@@ -1117,6 +1412,97 @@ function renderRules() {
 
 // --- shell -------------------------------------------------------------------
 
+// --- the month window control -----------------------------------------------
+
+const MONTH_RANGE = "smolplan.monthRange";
+
+function saveRange() {
+  try {
+    localStorage.setItem(MONTH_RANGE, JSON.stringify([monthFrom, monthTo]));
+  } catch (err) {
+    /* the window still works for this visit */
+  }
+}
+
+function loadRange() {
+  try {
+    const [from, to] = JSON.parse(localStorage.getItem(MONTH_RANGE) || "[]") || [];
+    monthFrom = typeof from === "string" ? from : null;
+    monthTo = typeof to === "string" ? to : null;
+  } catch (err) {
+    monthFrom = null;
+    monthTo = null;
+  }
+}
+
+function renderRange() {
+  const all = state.months;
+  // The clock moves and the horizon can be changed, so a remembered month may
+  // no longer exist. Drop it rather than showing a range nobody can see.
+  if (monthFrom && !all.includes(monthFrom)) monthFrom = null;
+  if (monthTo && !all.includes(monthTo)) monthTo = null;
+
+  const shown = visibleMonths();
+  const options = (chosen) =>
+    all.map((m) =>
+      el("option", m === chosen ? { value: m, selected: true } : { value: m }, monthLong(m))
+    );
+
+  const from = el(
+    "select",
+    {
+      title: "First month shown",
+      onchange: (e) => {
+        monthFrom = e.target.value;
+        // Keep the pair in order rather than refusing the change.
+        if (monthTo && mIndex(monthFrom) > mIndex(monthTo)) monthTo = monthFrom;
+        saveRange();
+        render();
+      },
+    },
+    options(shown[0])
+  );
+
+  const to = el(
+    "select",
+    {
+      title: "Last month shown",
+      onchange: (e) => {
+        monthTo = e.target.value;
+        if (monthFrom && mIndex(monthTo) < mIndex(monthFrom)) monthFrom = monthTo;
+        saveRange();
+        render();
+      },
+    },
+    options(shown[shown.length - 1])
+  );
+
+  return el(
+    "span",
+    { class: "range-inner" },
+    el("span", { class: "muted" }, "Showing"),
+    from,
+    el("span", { class: "muted" }, "to"),
+    to,
+    rangeIsNarrowed()
+      ? el(
+          "button",
+          {
+            class: "link",
+            title: `Show all ${all.length} months`,
+            onclick: () => {
+              monthFrom = null;
+              monthTo = null;
+              saveRange();
+              render();
+            },
+          },
+          "all"
+        )
+      : null
+  );
+}
+
 function render() {
   const views = {
     portfolio: renderPortfolio,
@@ -1129,6 +1515,7 @@ function render() {
   for (const button of document.querySelectorAll("#tabs button")) {
     button.classList.toggle("on", button.dataset.view === view);
   }
+  $("#range").replaceChildren(renderRange());
   const settings = state.settings;
   $("#clock").replaceChildren(
     el("span", {}, "Current month "),
@@ -1144,8 +1531,38 @@ document.querySelectorAll("#tabs button").forEach((button) => {
     render();
   });
 });
+// Wide mode is a per-browser preference, not part of the plan, so it lives in
+// localStorage. Reads and writes are guarded: a browser set to block site data
+// throws on access rather than returning null.
+const DRAWER_WIDE = "smolplan.drawerWide";
+
+function setDrawerWide(on) {
+  $("#drawer").classList.toggle("wide", on);
+  const button = $("#drawer-expand");
+  button.innerHTML = on ? "&#10529;" : "&#10530;";
+  button.title = on ? "Make the panel narrow" : "Make the panel wider";
+  try {
+    localStorage.setItem(DRAWER_WIDE, on ? "1" : "");
+  } catch (err) {
+    /* nothing to do; the toggle still works for this visit */
+  }
+}
+
+let startWide = false;
+try {
+  startWide = localStorage.getItem(DRAWER_WIDE) === "1";
+} catch (err) {
+  startWide = false;
+}
+setDrawerWide(startWide);
+
+$("#drawer-expand").addEventListener("click", () =>
+  setDrawerWide(!$("#drawer").classList.contains("wide"))
+);
 $("#drawer-close").addEventListener("click", closeDrawer);
 document.addEventListener("keydown", (e) => e.key === "Escape" && closeDrawer());
+
+loadRange();
 
 api("GET", "/api/state")
   .then((data) => {

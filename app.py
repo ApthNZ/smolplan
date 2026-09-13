@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 import db
 import engine
+import importer
 
 MAX_FTE_H = 10000  # 100.00 FTE
 MAX_OFFSET = 119  # ten years of profile
@@ -473,6 +474,92 @@ def update_settings(payload: SettingsIn, conn=Depends(get_conn)):
         db.set_setting(conn, "current_month", payload.current_month)
     conn.commit()
     return build_state(conn)
+
+
+class ImportIn(BaseModel):
+    csv: str = Field(min_length=1, max_length=4_000_000)
+
+
+@app.post("/api/import")
+def import_csv(payload: ImportIn, conn=Depends(get_conn)):
+    """Create or update initiatives from CSV, matching on Reference.
+
+    All or nothing: the file is validated completely before anything is
+    written, and every problem is reported at once. Start months in the past
+    are accepted here — unlike the editor — because an export of work already
+    under way is the normal case, and R7 means only the remaining months are
+    evaluated anyway.
+    """
+    data = db.load_engine_inputs(conn)
+    rows, errors = importer.parse(payload.csv, data["teams"])
+    if errors:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": f"Nothing was imported. {len(errors)} problem"
+                + ("s" if len(errors) != 1 else "")
+                + " found:",
+                "errors": errors,
+            },
+        )
+
+    before = {i["id"]: i["status"] for i in build_state(conn)["initiatives"]}
+
+    existing = {
+        (r["reference"] or "").lower(): r["id"]
+        for r in conn.execute(
+            "SELECT id, reference FROM initiative "
+            "WHERE reference IS NOT NULL AND reference != ''"
+        )
+    }
+    stamp = db.now()
+    created, updated = [], []
+
+    try:
+        for row in rows:
+            ref_key = row["reference"].lower()
+            initiative_id = existing.get(ref_key)
+            if initiative_id:
+                # Rank and archived are left alone: the file says what the work
+                # is, not where it sits in the plan or whether you set it aside.
+                conn.execute(
+                    "UPDATE initiative SET name = ?, start_month = ?, reference = ?, "
+                    "updated_at = ? WHERE id = ?",
+                    (row["name"], row["start_month"], row["reference"], stamp, initiative_id),
+                )
+                updated.append(row["name"])
+            else:
+                initiative_id = conn.execute(
+                    'INSERT INTO initiative (name, "rank", start_month, reference, owner, '
+                    "notes, archived, created_at, updated_at) VALUES (?, ?, ?, ?, '', '', 0, ?, ?)",
+                    (row["name"], db.next_rank(conn), row["start_month"], row["reference"], stamp, stamp),
+                ).lastrowid
+                existing[ref_key] = initiative_id
+                created.append(row["name"])
+
+            conn.execute("DELETE FROM demand WHERE initiative_id = ?", (initiative_id,))
+            for team_id, fte_h in row["demand"].items():
+                for offset in range(row["months"]):
+                    conn.execute(
+                        "INSERT INTO demand (initiative_id, team_id, offset_m, fte_h) "
+                        "VALUES (?, ?, ?, ?)",
+                        (initiative_id, team_id, offset, fte_h),
+                    )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    state = build_state(conn)
+    changed = [
+        {"name": i["name"], "from": before[i["id"]], "to": i["status"]}
+        for i in state["initiatives"]
+        if i["id"] in before and before[i["id"]] != i["status"]
+    ]
+    return {
+        **state,
+        "import": {"created": created, "updated": updated, "changed": changed},
+    }
 
 
 @app.post("/api/seed")

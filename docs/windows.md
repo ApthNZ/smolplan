@@ -9,22 +9,27 @@ dependency ships a Windows wheel.
 
 ## What you need
 
-- **Python 3.10 or newer.** 3.12 is a good default.
+- **Python 3.10 or newer.** The test suite is run on both 3.10 and 3.14, so
+  anything in that range is fine.
 - **Git**, optionally. You can download the code as a zip instead.
 
 Install both from an ordinary PowerShell window:
 
 ```powershell
-winget install -e --id Python.Python.3.12
+winget install -e --id Python.Python.3.13
 winget install -e --id Git.Git
 ```
 
 Close and reopen PowerShell afterwards so the new `PATH` takes effect.
 
+> **`py` or `python`?** This guide uses `py`, the launcher that ships with the
+> python.org and winget installers and picks the right version when you have
+> several. If `py` is not recognised, `python` works just as well — substitute
+> it throughout.
+>
 > **If `python` opens the Microsoft Store instead of running:** that's the
-> Windows app-execution alias. Use the launcher — `py` — everywhere this guide
-> says `py`, and it will find the real install. You can also turn the alias off
-> under Settings → Apps → Advanced app settings → App execution aliases.
+> Windows app-execution alias. Use `py`, or turn the alias off under
+> Settings → Apps → Advanced app settings → App execution aliases.
 
 ## Install
 
@@ -134,9 +139,22 @@ Get-NetTCPConnection -LocalPort 8000 -State Listen |
   ForEach-Object { Get-Process -Id $_ }
 ```
 
+**`.\.venv\Scripts\python.exe` is not recognised** — this reads like a missing
+program, but PowerShell uses the same wording for a **path that does not
+exist**. Python is fine; the virtual environment isn't there. Either the
+`py -m venv .venv` step was skipped or it failed, or you are not in the project
+folder. Run `dir` — you should see `app.py` and a `.venv` folder. If `.venv` is
+missing:
+
+```powershell
+cd $HOME\smolplan
+py -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
 **`py` is not recognised** — Python isn't installed, or PowerShell was open
-before you installed it. Reopen PowerShell; if it still fails, reinstall with
-the winget command above.
+before you installed it. Reopen PowerShell and try `python` instead; if both
+fail, reinstall with the winget command above.
 
 **The page loads but is blank, or looks unstyled** — a stale cache. Hard-reload
 with `Ctrl+F5`.
