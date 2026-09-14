@@ -562,6 +562,27 @@ def import_csv(payload: ImportIn, conn=Depends(get_conn)):
     }
 
 
+class ConvertIn(BaseModel):
+    text: str = Field(max_length=100_000)
+
+
+@app.post("/api/convert")
+def convert_summary(payload: ConvertIn, conn=Depends(get_conn)):
+    """Turn "GRC: 1" lines into the two CSV rows an import needs.
+
+    Shares parse_fte with the importer, so anything this returns is something
+    the import will accept. Touches no data.
+    """
+    data = db.load_engine_inputs(conn)
+    result = importer.parse_demand_summary(payload.text, data["teams"])
+    if result["errors"]:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": "Could not convert:", "errors": result["errors"]},
+        )
+    return result
+
+
 @app.post("/api/seed")
 def reseed(conn=Depends(get_conn)):
     db.seed_fixture(conn)

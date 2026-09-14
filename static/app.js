@@ -30,6 +30,15 @@ function el(tag, attrs = {}, ...kids) {
   return node;
 }
 
+// replaceChildren() turns a null argument into the text "null", unlike el(),
+// which skips it. Conditional children are everywhere in this file, so nothing
+// calls replaceChildren directly — tests/test_security.py enforces that.
+function setChildren(node, ...kids) {
+  node.replaceChildren(
+    ...kids.flat().filter((kid) => kid != null && kid !== false)
+  );
+}
+
 const fte = (h) => (h / 100).toFixed(2);
 const parseFte = (text) => {
   const value = parseFloat(text);
@@ -89,9 +98,7 @@ async function send(method, path, body) {
 }
 
 function drawer(...content) {
-  // replaceChildren() stringifies a null into the text "null", unlike el(),
-  // which skips it. Drawer sections are routinely conditional, so filter.
-  $("#drawer-body").replaceChildren(...content.filter((node) => node != null && node !== false));
+  setChildren($("#drawer-body"), ...content);
   $("#drawer").hidden = false;
 }
 const closeDrawer = () => ($("#drawer").hidden = true);
@@ -644,7 +651,7 @@ function openEditor(initiative) {
         })
       )
     );
-    gridBox.replaceChildren(el("table", {}, el("thead", {}, head), el("tbody", {}, body)));
+    setChildren(gridBox, el("table", {}, el("thead", {}, head), el("tbody", {}, body)));
   }
   drawGrid();
 
@@ -662,8 +669,8 @@ function openEditor(initiative) {
       Array.from({ length: columns }, (_, o) =>
         el("option", o === offset ? { value: o, selected: true } : { value: o }, monthLong(columnMonth(o)))
       );
-    fillFrom.replaceChildren(...options(Math.min(from, columns - 1)));
-    fillTo.replaceChildren(...options(Math.min(to, columns - 1)));
+    setChildren(fillFrom, ...options(Math.min(from, columns - 1)));
+    setChildren(fillTo, ...options(Math.min(to, columns - 1)));
   }
   drawFillRange();
 
@@ -1124,6 +1131,120 @@ function monthGrid(read, write) {
 
 // --- settings ----------------------------------------------------------------
 
+// Plain HTTP on a LAN is not a secure context, so navigator.clipboard does not
+// exist there. Selecting the text and asking the browser to copy still works.
+function copyFrom(box, report) {
+  const done = (message) => report(message);
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(box.value).then(
+      () => done("Copied."),
+      () => done("Select the text and copy it with Ctrl+C.")
+    );
+    return;
+  }
+  try {
+    box.select();
+    box.setSelectionRange(0, box.value.length);
+    done(document.execCommand("copy") ? "Copied." : "Select the text and copy it with Ctrl+C.");
+  } catch (err) {
+    done("Select the text and copy it with Ctrl+C.");
+  }
+}
+
+function converterPanel() {
+  const input = el("textarea", {
+    rows: "5",
+    spellcheck: "false",
+    placeholder: state.teams.map((t) => `${t.name}: 1`).join("\n"),
+    style: "width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px",
+  });
+  const output = el("textarea", {
+    rows: "2",
+    readonly: "readonly",
+    spellcheck: "false",
+    style: "width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px",
+  });
+  const result = el("div", { class: "import-result" });
+  const outputBox = el("div", { hidden: "hidden" }, output);
+
+  async function convert() {
+    const text = input.value;
+    setChildren(result);
+    try {
+      const response = await fetch("/api/convert", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        outputBox.hidden = true;
+        const detail = (data && data.detail) || {};
+        setChildren(result, 
+          el("p", { class: "status-red" }, detail.message || "Could not convert."),
+          el("ul", { class: "import-errors" }, (detail.errors || []).map((e) => el("li", {}, e)))
+        );
+        return;
+      }
+      output.value = data.csv;
+      outputBox.hidden = false;
+      setChildren(result, 
+        el("p", { class: "status-green" }, `${data.names.length} teams converted.`),
+        data.unknown.length
+          ? el("p", { class: "muted" },
+              `Not a team here yet: ${data.unknown.join(", ")}. The import will reject `
+                + "these unless you add them first.")
+          : null
+      );
+    } catch (err) {
+      setChildren(result, el("p", { class: "status-red" }, err.message));
+    }
+  }
+
+  return el(
+    "div",
+    {},
+    el("p", { class: "muted" },
+      "Turn a demand summary into the two CSV rows an import needs \u2014 the team "
+      + "names, and their FTE. Spacing does not matter, and the numbers are checked "
+      + "against the same rules the import applies."),
+    el("pre", { class: "sample" }, state.teams.map((t, i) => `${t.name}: ${i ? "0.5" : "1"}`).join("\n")),
+    input,
+    el("div", { class: "row", style: "margin-top:8px" },
+      el("button", { class: "primary", onclick: convert }, "Convert"),
+      el("button", {
+        onclick: () => {
+          input.value = "";
+          output.value = "";
+          outputBox.hidden = true;
+          setChildren(result);
+        },
+      }, "Clear")),
+    outputBox,
+    el("div", { class: "row", style: "margin-top:6px" },
+      el("button", {
+        onclick: () =>
+          copyFrom(output, (message) =>
+            setChildren(result, el("p", { class: "muted" }, message))),
+      }, "Copy"),
+      el("button", {
+        title: "Put these columns straight into the import box below",
+        onclick: () => {
+          const box = document.querySelector("#view .import-csv");
+          if (!box || !output.value) return;
+          const [header, values] = output.value.split("\n");
+          box.value = `InitiativeName,Reference,StartMonth,EndMonth,${header}\n`
+            + `,,,${values ? "," + values : ""}`;
+          box.focus();
+          setChildren(result, 
+            el("p", { class: "muted" }, "Dropped into the import box \u2014 fill in the first four columns.")
+          );
+        },
+      }, "Use in the import below")),
+    result
+  );
+}
+
 function importPanel() {
   const teams = state.teams.map((t) => t.name);
   const sample =
@@ -1133,6 +1254,7 @@ function importPanel() {
       ...teams.map((_, i) => (i === 0 ? "1" : "0.5"))].join(",");
 
   const box = el("textarea", {
+    class: "import-csv",
     rows: "6",
     spellcheck: "false",
     placeholder: "Paste CSV here, or choose a file above",
@@ -1148,7 +1270,7 @@ function importPanel() {
       const reader = new FileReader();
       reader.onload = () => {
         box.value = String(reader.result || "");
-        result.replaceChildren(el("p", { class: "muted" }, `Loaded ${chosen.name}. Check it, then import.`));
+        setChildren(result, el("p", { class: "muted" }, `Loaded ${chosen.name}. Check it, then import.`));
       };
       reader.readAsText(chosen);
     },
@@ -1157,10 +1279,10 @@ function importPanel() {
   async function run() {
     const csv = box.value.trim();
     if (!csv) {
-      result.replaceChildren(el("p", { class: "status-red" }, "Nothing to import — paste some CSV or choose a file."));
+      setChildren(result, el("p", { class: "status-red" }, "Nothing to import — paste some CSV or choose a file."));
       return;
     }
-    result.replaceChildren(el("p", { class: "muted" }, "Importing…"));
+    setChildren(result, el("p", { class: "muted" }, "Importing…"));
     try {
       const response = await fetch("/api/import", {
         method: "POST",
@@ -1173,7 +1295,7 @@ function importPanel() {
         // so it can be corrected rather than re-pasted.
         const detail = data && data.detail;
         const problems = (detail && detail.errors) || [String((detail && detail.message) || "Import failed.")];
-        result.replaceChildren(
+        setChildren(result, 
           el("p", { class: "status-red" }, (detail && detail.message) || "Import failed."),
           el("ul", { class: "import-errors" }, problems.map((p) => el("li", {}, p)))
         );
@@ -1183,7 +1305,7 @@ function importPanel() {
       importResult = data.import;
       render();
     } catch (err) {
-      result.replaceChildren(el("p", { class: "status-red" }, err.message));
+      setChildren(result, el("p", { class: "status-red" }, err.message));
     }
   }
 
@@ -1226,9 +1348,20 @@ function importPanel() {
     box,
     el("div", { class: "row", style: "margin-top:8px" },
       el("button", { class: "primary", onclick: run }, "Import"),
-      el("button", { onclick: () => { box.value = ""; importResult = null; result.replaceChildren(); } }, "Clear")),
+      el("button", { onclick: () => { box.value = ""; importResult = null; setChildren(result); } }, "Clear")),
     ...summary.filter(Boolean),
     result
+  );
+}
+
+function renderConvert() {
+  return el(
+    "div",
+    { class: "prose" },
+    el("h2", {}, "Convert a demand summary"),
+    converterPanel(),
+    el("h2", { style: "margin-top:26px" }, "Import from CSV"),
+    importPanel()
   );
 }
 
@@ -1272,9 +1405,6 @@ function renderSettings() {
         "Save settings"
       )
     ),
-    el("h3", {}, "Import from CSV"),
-    importPanel(),
-
     el("h3", {}, "Fixture"),
     el(
       "p",
@@ -1508,16 +1638,17 @@ function render() {
     portfolio: renderPortfolio,
     heatmap: renderHeatmap,
     supply: renderSupply,
+    convert: renderConvert,
     rules: renderRules,
     settings: renderSettings,
   };
-  $("#view").replaceChildren(views[view]());
+  setChildren($("#view"), views[view]());
   for (const button of document.querySelectorAll("#tabs button")) {
     button.classList.toggle("on", button.dataset.view === view);
   }
-  $("#range").replaceChildren(renderRange());
+  setChildren($("#range"), renderRange());
   const settings = state.settings;
-  $("#clock").replaceChildren(
+  setChildren($("#clock"), 
     el("span", {}, "Current month "),
     el("b", { class: settings.current_month_override ? "fake" : "" }, settings.current_month),
     el("span", {}, settings.current_month_override ? " (override)" : "")

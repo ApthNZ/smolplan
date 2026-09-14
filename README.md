@@ -57,8 +57,8 @@ fixture* puts it back.
 
 ## Importing from a spreadsheet
 
-Settings has a CSV import, for pulling initiatives out of an issue tracker
-rather than typing them in:
+The **Import and convert** tab has a CSV import, for pulling initiatives out of
+an issue tracker rather than typing them in:
 
 ```
 InitiativeName,Reference,StartMonth,EndMonth,SOC,GRC
@@ -88,6 +88,22 @@ If anything is wrong — an unknown team, a malformed month, an end before a
 start, a duplicated reference — the whole file is rejected, nothing is written,
 and you get every problem at once rather than one per attempt.
 
+### Building the team columns
+
+The same tab converts a demand summary into the two rows the import needs, so
+you don't have to line the columns up by hand:
+
+```
+GRC: 1          ->      GRC,SOC,ENG
+SOC:2                   1,2,0.5
+  ENG : 0.5
+```
+
+Spacing is irrelevant and the numbers go through the same validation the import
+applies, so anything it produces will be accepted. A team that doesn't exist yet
+is flagged as a warning rather than an error — the summary might be for another
+instance — but the import will reject it until you add the team.
+
 ## What's on screen
 
 - **Portfolio** — the ranked list beside a monthly timeline. Drag a row to
@@ -101,10 +117,12 @@ and you get every problem at once rather than one per attempt.
 - **Supply and reserves** — editable grids with a bulk fill, e.g. set SOC to
   2.00 FTE from one month to another. Leaving the FTE box empty clears those
   months, which means "no supply data", not zero.
+- **Import and convert** — CSV import, and a converter that turns a
+  `GRC: 1` style summary into the team columns an import needs.
 - **Rules** — the allocation rules, what each colour means, and the behaviour
   that surprises people.
 - **Settings** — the horizon, a current-month override for experimenting, and
-  the CSV import.
+  a reset to the demo fixture.
 
 The month range in the header narrows all three data views at once. It only
 changes what you see: the plan is always worked out over the whole horizon, so

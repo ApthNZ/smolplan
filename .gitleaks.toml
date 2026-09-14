@@ -1,0 +1,45 @@
+# gitleaks config for CI.
+#
+# Default rules plus an allowlist for documentation placeholders and test
+# fixtures. The allowlist matches on the *shape of the secret*, never on the
+# file it lives in — "ignore anything under tests/" is how a real key gets
+# committed to a test fixture and never seen again.
+#
+# This file is safe to commit to a public repo: it contains only generic
+# placeholder patterns. The disclosure deny-list — names and addresses that
+# must not become public — is a separate private ruleset and deliberately does
+# not live here, since such a list enumerates exactly what it protects.
+
+title = "ci-secret-scan"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Documentation placeholders and obvious test fixtures"
+regexTarget = "secret"
+regexes = [
+  # YOUR_AUTH_TOKEN, my-api-key, example_secret, CHANGEME, <REDACTED>, ...
+  '''(?i)^[<{\["']*(your|my|the|some|example|sample|dummy|fake|placeholder|redacted|changeme|replace[_-]?me|insert|todo|abc|xxx)[_-]''',
+  '''(?i)(your|example|sample|dummy|fake|placeholder|redacted|changeme)[_-]?(auth[_-]?)?(token|key|secret|password|credential)''',
+  # test-e2e-api-key-12345, test_key_1234567890123456
+  '''(?i)^[<{\["']*test[_-]''',
+  # Sequential filler: sk-abcdef1234567890..., sk-1234567890abcdef
+  '''(?i)(abcdef1234567890|1234567890abcdef|0123456789abcdef)''',
+  '''^(0{8,}|1{8,}|2{8,}|3{8,}|4{8,}|5{8,}|6{8,}|7{8,}|8{8,}|9{8,})$''',
+  # Unrendered template variables: {{ elastic_password }}, ${API_KEY}, $TOKEN
+  '''\{\{''',  # any Jinja/Go template opening; gitleaks often truncates the capture at it
+  '''\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$''',
+  '''^<[A-Za-z0-9_ -]+>$''',
+  # Bare all-caps words used as literal stand-ins: "elastic:PASSWORD"
+  '''(^|:)(PASSWORD|SECRET|TOKEN|API_?KEY|CREDENTIAL|USERNAME)$''',
+]
+
+[[allowlists]]
+description = "Environment templates and lockfiles"
+paths = [
+  '''(^|/)\.env\.example$''',
+  '''(^|/)\.env\.sample$''',
+  '''(^|/)\.env\.template$''',
+  '''(^|/)(package-lock\.json|poetry\.lock|yarn\.lock|Cargo\.lock)$''',
+]

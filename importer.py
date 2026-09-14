@@ -212,3 +212,78 @@ def parse(text: str, teams: list[dict]) -> tuple[list[dict], list[str]]:
     if errors:
         return [], errors
     return rows, []
+
+
+# --- the demand-summary converter --------------------------------------------
+
+
+def parse_demand_summary(text: str, teams: list[dict] | None = None) -> dict:
+    """Turn "GRC: 1" lines into the two CSV rows an import needs.
+
+        GRC: 1          ->      GRC,SOC,ENG
+        SOC:2                   1,2,0.5
+          ENG : 0.5
+
+    Values are validated with the same parse_fte the import uses, so anything
+    this emits is something the import will accept. They are echoed as written
+    rather than normalised — 0.5 stays 0.5 — because the point is to save
+    typing, not to reformat.
+
+    Returns {"names", "values", "csv", "errors", "unknown"}. Unknown team names
+    are a warning, not an error: a summary may be built for another instance.
+    """
+    known = {key(t["name"]): t["name"] for t in (teams or [])}
+
+    names: list[str] = []
+    values: list[str] = []
+    errors: list[str] = []
+    seen: dict[str, int] = {}
+
+    for offset, raw in enumerate(text.splitlines()):
+        line = offset + 1
+        if not normalise(raw):
+            continue  # blank lines are just spacing
+
+        if ":" not in raw:
+            errors.append(f"Line {line}: no colon. Each line should read \"Team: FTE\".")
+            continue
+
+        # Split on the first colon only, so a stray one in a value is caught by
+        # the number check rather than silently truncating the line.
+        name, _, value = raw.partition(":")
+        name = normalise(name)
+        value = normalise(value)
+
+        if not name:
+            errors.append(f"Line {line}: no team name before the colon.")
+            continue
+        if not value:
+            errors.append(f"Line {line}: no FTE after the colon for {name}.")
+            continue
+
+        previous = seen.get(key(name))
+        if previous:
+            errors.append(f"Line {line}: {name} already appears on line {previous}.")
+            continue
+        seen[key(name)] = line
+
+        try:
+            parse_fte(value)
+        except ValueError as exc:
+            errors.append(f"Line {line}, {name}: {exc}.")
+            continue
+
+        names.append(known.get(key(name), name))
+        values.append(value)
+
+    if not errors and not names:
+        errors.append("Nothing to convert. Enter one line per team, as \"Team: FTE\".")
+
+    unknown = [n for n in names if known and key(n) not in known]
+    return {
+        "names": names,
+        "values": values,
+        "csv": ",".join(names) + "\n" + ",".join(values) if names and not errors else "",
+        "errors": errors,
+        "unknown": unknown,
+    }

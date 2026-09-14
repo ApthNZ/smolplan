@@ -1,0 +1,46 @@
+name: dependabot-automerge
+
+# Tests every Dependabot PR and merges it if the tests pass — regardless of
+# semver level (patch, minor, or major). The test suite IS the judgment: if an
+# upgrade breaks something, tests fail and the merge does not happen. Nothing
+# waits on human review.
+#
+# Uses pull_request_target so the GITHUB_TOKEN has merge rights even for
+# Dependabot PRs. Only Dependabot-authored PRs are processed (see `if` below).
+
+on: pull_request_target
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  test-and-merge:
+    runs-on: ubuntu-latest
+    if: github.actor == 'dependabot[bot]'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies and run tests
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          for f in requirements-dev.txt requirements-test.txt test-requirements.txt dev-requirements.txt; do
+            [ -f "$f" ] && pip install -r "$f"
+          done
+          pip install pytest pytest-asyncio
+          if [ -f run_tests.py ]; then python run_tests.py; else python -m pytest tests/ -q; fi
+
+      # Only runs if the test step above succeeded. A failing upgrade never
+      # reaches this step, so it stays open (visible on the status wall) until
+      # the upstream incompatibility is resolved.
+      - name: Merge (tests passed)
+        run: gh pr merge --squash "${{ github.event.pull_request.html_url }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

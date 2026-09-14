@@ -294,3 +294,101 @@ def test_parser_reports_unknown_teams_when_none_exist():
     rows, errors = importer.parse(HEADER + "\nX,PRO-1,2027-01,2027-02,1,0.5\n", [])
     assert rows == []
     assert "add a team first" in errors[0]
+
+
+# --- the demand-summary converter --------------------------------------------
+
+
+def convert(client, text):
+    return client.post("/api/convert", json={"text": text})
+
+
+def test_the_example_from_the_request(client):
+    body = convert(client, "GRC: 1\nSOC: 2\nENG: 0.5").json()
+    assert body["csv"] == "GRC,SOC,ENG\n1,2,0.5"
+    assert body["names"] == ["GRC", "SOC", "ENG"]
+    assert body["values"] == ["1", "2", "0.5"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "GRC:1\nSOC:2",
+        "GRC: 1\nSOC: 2",
+        "GRC:   1   \nSOC:2",
+        "   GRC :1\n  SOC : 2  ",
+        "\n\nGRC: 1\n\n\nSOC: 2\n\n",
+        "\tGRC:\t1\nSOC:2\t",
+    ],
+)
+def test_spacing_does_not_matter(client, text):
+    assert convert(client, text).json()["csv"] == "GRC,SOC\n1,2"
+
+
+def test_known_team_names_are_corrected_to_their_real_case(client):
+    """The import matches case-insensitively anyway, but the CSV reads better
+    with the team's actual name in it."""
+    body = convert(client, "grc: 1\n  soc : 2").json()
+    assert body["names"] == ["GRC", "SOC"]
+
+
+def test_values_are_echoed_not_reformatted(client):
+    body = convert(client, "GRC: 0.5\nSOC: 1").json()
+    assert body["values"] == ["0.5", "1"]  # not 0.50 and 1.00
+
+
+def test_a_team_that_does_not_exist_is_a_warning_not_an_error(client):
+    body = convert(client, "GRC: 1\nENG: 0.5").json()
+    assert body["unknown"] == ["ENG"]
+    assert body["csv"] == "GRC,ENG\n1,0.5"
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("GRC 1", "no colon"),
+        ("GRC:", "no FTE after the colon"),
+        (": 1", "no team name"),
+        ("GRC: 1\nGRC: 2", "already appears on line 1"),
+        ("GRC: one", "not a number"),
+        ("GRC: 0.333", "two decimal places"),
+        ("GRC: -1", "negative"),
+        ("GRC: 9999", "above the maximum"),
+        ("", "Nothing to convert"),
+        ("   \n\n  ", "Nothing to convert"),
+    ],
+)
+def test_rejected_summaries(client, text, expected):
+    response = convert(client, text)
+    assert response.status_code == 400, text
+    assert expected.lower() in " ".join(response.json()["detail"]["errors"]).lower()
+
+
+def test_every_problem_is_reported_at_once_here_too(client):
+    response = convert(client, "GRC 1\nSOC: two\nGRC: 1\nGRC: 2")
+    errors = response.json()["detail"]["errors"]
+    assert len(errors) >= 3
+
+
+def test_converted_output_is_something_the_importer_accepts(client):
+    """The point of sharing parse_fte: whatever the converter emits must get
+    through the import's validation."""
+    converted = convert(client, "SOC: 1\nGRC: 0.25").json()["csv"]
+    header, values = converted.split("\n")
+
+    csv = f"InitiativeName,Reference,StartMonth,EndMonth,{header}\n"
+    csv += f"Built by the converter,PRO-9,2027-02,2027-04,{values}\n"
+    response = client.post("/api/import", json={"csv": csv})
+    assert response.status_code == 200, response.json()
+
+    state = response.json()
+    teams = {t["name"]: t["id"] for t in state["teams"]}
+    built = by_name(state)["Built by the converter"]
+    assert demand_of(built, teams["SOC"])[0] == (0, 100)
+    assert demand_of(built, teams["GRC"])[0] == (0, 25)
+
+
+def test_convert_writes_nothing(client):
+    before = client.get("/api/state").json()
+    convert(client, "GRC: 1\nSOC: 2")
+    assert client.get("/api/state").json() == before
