@@ -7,6 +7,20 @@ name: dependabot-automerge
 #
 # Uses pull_request_target so the GITHUB_TOKEN has merge rights even for
 # Dependabot PRs. Only Dependabot-authored PRs are processed (see `if` below).
+#
+# This file is published to the public mirror, and since 2026-09-17 the mirror
+# is a fast-forward of this history — so a merge there would put a commit on
+# public/main that private/main does not have, and every later `git push public
+# main` would be refused as a non-fast-forward. The repository guard below is
+# what prevents that: bumps land here and reach the mirror by being pushed.
+#
+# It also means this workflow never runs on the public repo at all, which
+# retires the old worry about `github.actor` being the only thing between a
+# stranger's PR and a write-scoped token on a world-readable repo.
+#
+# Dependabot still opens its own PRs against the mirror. They are duplicates,
+# they cannot be merged there, and Dependabot closes them by itself once the
+# same bump arrives from here.
 
 on: pull_request_target
 
@@ -17,7 +31,7 @@ permissions:
 jobs:
   test-and-merge:
     runs-on: ubuntu-latest
-    if: github.actor == 'dependabot[bot]'
+    if: github.actor == 'dependabot[bot]' && endsWith(github.repository, '-private')
     steps:
       - uses: actions/checkout@v7
         with:
