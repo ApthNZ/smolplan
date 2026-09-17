@@ -117,6 +117,8 @@ function visibleMonths() {
 const rangeIsNarrowed = () => visibleMonths().length < state.months.length;
 
 const teamName = (id) => (state.teams.find((t) => t.id === id) || {}).name || `Team ${id}`;
+const shortfallTeams = (initiative) =>
+  [...new Set((initiative.shortfalls || []).map((s) => s.team_id))].map(teamName).sort();
 const cellAt = (teamId, month) => state.cells[`${teamId}|${month}`];
 
 // Hues chosen to stay clear of the green and red used for status.
@@ -450,6 +452,16 @@ function sideRow(initiative) {
   return row;
 }
 
+// Red bars say which teams are short; there is nothing as useful to say about a
+// green one, so it keeps the drag hint.
+function barTitle(initiative, locked) {
+  if (locked) return `${initiative.name} — archived`;
+  const teams = initiative.status === "red" ? shortfallTeams(initiative) : [];
+  return teams.length
+    ? `${initiative.name} — shortfalls in: ${teams.join(", ")}`
+    : `${initiative.name} — drag to move the start`;
+}
+
 function timelineRow(initiative, months) {
   const row = el("div", { class: "tl-row" });
   const grid = el("div", { class: "grid" });
@@ -481,9 +493,7 @@ function timelineRow(initiative, months) {
     {
       class: `bar ${initiative.status} ${locked ? "locked" : ""}`,
       style: `left:${left}px;width:${cells * COL - 4}px`,
-      title: locked
-        ? `${initiative.name} — archived`
-        : `${initiative.name} — drag to move the start`,
+      title: barTitle(initiative, locked),
     },
     initiative.status === "red" ? el("span", { class: "icon" }, "▲") : null,
     el("span", {}, initiative.name)
