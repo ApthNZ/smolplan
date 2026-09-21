@@ -1,6 +1,8 @@
 """API tests. These run against a throwaway database seeded with the fixture."""
 
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -235,3 +237,53 @@ def test_requested_start_month_column_is_dropped(tmp_path):
 
 def _columns(conn):
     return [r["name"] for r in conn.execute("PRAGMA table_info(initiative)")]
+
+
+# --- the connection and the threadpool ---------------------------------------
+
+
+def test_a_connection_survives_the_handover_between_threads(tmp_path):
+    """FastAPI runs a sync dependency's setup, the endpoint and its teardown as
+    three separate threadpool jobs, and anyio need not give them the same worker
+    thread. sqlite3's default check_same_thread rejects the handover — as a
+    ProgrammingError out of the endpoint, or out of conn.close() after it.
+    """
+    conn = db.connect(str(tmp_path / "handover.db"))
+    db.init_db(conn)
+
+    failures = []
+
+    def use_it_from_another_thread():
+        try:
+            conn.execute("SELECT id, name FROM team ORDER BY name").fetchall()
+            conn.close()
+        except Exception as exc:  # noqa: BLE001 — the point is to report any
+            failures.append(exc)
+
+    thread = threading.Thread(target=use_it_from_another_thread)
+    thread.start()
+    thread.join()
+
+    assert failures == []
+
+
+def test_concurrent_reads_all_succeed(client):
+    """One request per worker thread is the case that used to fail: a warm
+    threadpool hands the dependency and the endpoint different workers."""
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        responses = [pool.submit(client.get, "/api/state") for _ in range(24)]
+        codes = [r.result().status_code for r in responses]
+
+    assert codes == [200] * 24
+
+
+def test_concurrent_writes_all_succeed(client):
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        responses = [
+            pool.submit(client.post, "/api/teams", json={"name": f"T{i}"}) for i in range(8)
+        ]
+        codes = sorted(r.result().status_code for r in responses)
+
+    assert codes == [200] * 8
+    names = {t["name"] for t in client.get("/api/state").json()["teams"]}
+    assert {f"T{i}" for i in range(8)} <= names
