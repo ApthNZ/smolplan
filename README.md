@@ -71,6 +71,11 @@ value is that team's FTE for **every** month from start to end inclusive. A
 blank cell means that team isn't needed. Column order and capitalisation don't
 matter, because columns are matched by header name.
 
+`StartMonth` and `EndMonth` are months, but a spreadsheet asked for a month
+hands back a timestamp, so a full date is accepted and reduced to its month:
+`1/07/2026 0:00` and `2026-07-31` are both `2026-07`. Slashed dates are read
+day-first.
+
 Rows are matched on `Reference` — an issue key, typically — so re-importing an
 updated export **updates those initiatives in place** rather than duplicating
 them. Rank and archived state are left alone: the file says what the work is,
@@ -99,8 +104,10 @@ SOC:2                   1,2,0.5
   ENG : 0.5
 ```
 
-Spacing is irrelevant and the numbers go through the same validation the import
-applies, so anything it produces will be accepted. A team that doesn't exist yet
+Spacing is irrelevant, double quotes are dropped wherever they appear — a
+summary pasted out of a spreadsheet arrives full of them — and the numbers go
+through the same validation the import applies, so anything it produces will be
+accepted. A team that doesn't exist yet
 is flagged as a warning rather than an error — the summary might be for another
 instance — but the import will reject it until you add the team.
 

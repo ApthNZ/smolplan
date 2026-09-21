@@ -1216,8 +1216,8 @@ function converterPanel() {
     {},
     el("p", { class: "muted" },
       "Turn a demand summary into the two CSV rows an import needs \u2014 the team "
-      + "names, and their FTE. Spacing does not matter, and the numbers are checked "
-      + "against the same rules the import applies."),
+      + "names, and their FTE. Spacing and quote marks do not matter, and the numbers "
+      + "are checked against the same rules the import applies."),
     el("pre", { class: "sample" }, state.teams.map((t, i) => `${t.name}: ${i ? "0.5" : "1"}`).join("\n")),
     input,
     el("div", { class: "row", style: "margin-top:8px" },
@@ -1351,6 +1351,7 @@ function importPanel() {
     el("ul", { class: "import-notes muted" },
       el("li", {}, "One column per team, headed with the team name. The value is that team's FTE for every month from StartMonth to EndMonth inclusive."),
       el("li", {}, "A blank team cell means that team is not needed. Column order and capitalisation do not matter."),
+      el("li", {}, "StartMonth and EndMonth are YYYY-MM, but a full date is accepted too \u2014 1/07/2026 0:00 is read as 2026-07. Slashed dates are read day-first."),
       el("li", {}, "A start in the past is accepted — only the remaining months are evaluated."),
       el("li", {}, "New rows are added below everything already in the plan. Nothing is ever deleted or re-ranked."),
       el("li", {}, "If anything is wrong, the whole file is rejected and you get every problem at once.")),

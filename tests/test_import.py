@@ -234,6 +234,81 @@ def test_a_span_longer_than_the_offset_limit_is_rejected(client):
     assert "more than the limit" in " ".join(response.json()["detail"]["errors"])
 
 
+# --- full dates where a month was asked for ----------------------------------
+
+
+@pytest.mark.parametrize(
+    "written,month",
+    [
+        ("2027-02", "2027-02"),          # already a month, untouched
+        ("1/02/2027 0:00", "2027-02"),   # the Excel export in the request
+        ("1/02/2027", "2027-02"),
+        ("28/02/2027", "2027-02"),       # the day is irrelevant
+        ("01/02/2027 09:30:00", "2027-02"),
+        ("1-02-2027", "2027-02"),
+        ("2027-02-01", "2027-02"),
+        ("2027-02-28T00:00:00", "2027-02"),
+        ("2027-2-9", "2027-02"),
+    ],
+)
+def test_a_full_date_is_read_as_its_month(written, month):
+    assert importer.month_of(written) == month
+
+
+@pytest.mark.parametrize(
+    "written",
+    ["", "nonsense", "2027", "2027-13", "0/02/2027", "32/02/2027", "13/13/2027", "1/2/27"],
+)
+def test_what_is_not_a_date_is_left_alone(written):
+    """Returned unchanged so the error message quotes what the file said."""
+    assert importer.month_of(written) == written
+
+
+def test_slashed_dates_are_read_day_first():
+    assert importer.month_of("7/01/2027") == "2027-01"  # 7 January, not July
+    assert importer.month_of("01/7/2027") == "2027-07"
+
+
+def test_a_second_number_above_twelve_is_read_month_first():
+    """Only one reading of 2/31/2027 is a date at all."""
+    assert importer.month_of("2/31/2027") == "2027-02"
+
+
+def test_a_file_of_full_dates_imports(client):
+    response = post(client, HEADER + "\n"
+        "Exported,PRO-1,1/02/2027 0:00,30/04/2027 0:00,1,\n")
+    assert response.status_code == 200, response.json()
+
+    state = response.json()
+    teams = {t["name"]: t["id"] for t in state["teams"]}
+    exported = by_name(state)["Exported"]
+    assert demand_of(exported, teams["SOC"]) == [(0, 100), (1, 100), (2, 100)]
+
+
+def test_the_two_columns_need_not_agree_on_format(client):
+    rows, errors = importer.parse(
+        HEADER + "\nX,PRO-1,1/02/2027 0:00,2027-03,1,\n",
+        [{"id": 1, "name": "SOC"}, {"id": 2, "name": "GRC"}],
+    )
+    assert errors == []
+    assert rows[0]["start_month"] == "2027-02"
+    assert rows[0]["months"] == 2
+
+
+def test_a_date_that_is_not_one_still_names_the_column(client):
+    response = post(client, HEADER + "\nX,PRO-1,32/02/2027,2027-03,1,\n")
+    assert response.status_code == 400
+    errors = " ".join(response.json()["detail"]["errors"])
+    assert "StartMonth" in errors and "32/02/2027" in errors
+
+
+def test_full_dates_still_compare_as_months(client):
+    """An end before the start is caught after normalisation, not before."""
+    response = post(client, HEADER + "\nX,PRO-1,1/04/2027,28/02/2027,1,\n")
+    assert response.status_code == 400
+    assert "before StartMonth" in " ".join(response.json()["detail"]["errors"])
+
+
 # --- what the summary reports ------------------------------------------------
 
 
@@ -392,3 +467,33 @@ def test_convert_writes_nothing(client):
     before = client.get("/api/state").json()
     convert(client, "GRC: 1\nSOC: 2")
     assert client.get("/api/state").json() == before
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '"GRC": 1\n"SOC": 2',
+        'GRC: "1"\nSOC: "2"',
+        '"GRC: 1"\n"SOC: 2"',
+        '  "GRC" :  "1"  \n SOC: 2 ',
+    ],
+)
+def test_quotes_from_a_paste_are_stripped_not_rejected(client, text):
+    body = convert(client, text).json()
+    assert body["csv"] == "GRC,SOC\n1,2"
+    assert body["unknown"] == []
+
+
+def test_a_quoted_team_name_still_matches_a_known_team(client):
+    body = convert(client, '"grc": 1').json()
+    assert body["names"] == ["GRC"]
+
+
+def test_a_line_of_nothing_but_quotes_is_spacing(client):
+    assert convert(client, 'GRC: 1\n"""\nSOC: 2').json()["csv"] == "GRC,SOC\n1,2"
+
+
+def test_stripping_quotes_does_not_excuse_a_bad_number(client):
+    response = convert(client, 'GRC: "one"')
+    assert response.status_code == 400
+    assert "not a number" in " ".join(response.json()["detail"]["errors"])

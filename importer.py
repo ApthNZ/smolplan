@@ -12,12 +12,15 @@ Expected shape, matched by header name so column order does not matter:
 
 Every column that is not one of the four known headers is a team name, and its
 value is that team's FTE for every month from StartMonth to EndMonth inclusive.
+
+StartMonth and EndMonth may also arrive as full dates — see month_of.
 """
 
 from __future__ import annotations
 
 import csv
 import io
+import re
 from decimal import Decimal, InvalidOperation
 
 from engine import MONTH_RE, month_index, month_span
@@ -41,6 +44,45 @@ def normalise(value: str | None) -> str:
 
 def key(value: str | None) -> str:
     return normalise(value).lower()
+
+
+# A spreadsheet asked for a month will hand back a timestamp: "1/07/2026 0:00"
+# out of Excel, "2026-07-01T00:00:00" out of an issue tracker. Both forms are
+# matched here and reduced to their month.
+ISO_DATE_RE = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T ].*)?$")
+SLASH_DATE_RE = re.compile(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{4})(?:[T ].*)?$")
+
+
+def month_of(value: str | None) -> str:
+    """A month, from a month or from a full date.
+
+    The day and the time in a full date say nothing a plan cares about, so they
+    are dropped rather than rejected — 1/07/2026 and 31/07/2026 are both
+    2026-07. Anything that is not a date is returned unchanged, for the caller
+    to reject with the text the file actually contained.
+
+    Slashed dates are read day-first, the form the spreadsheets feeding this
+    tool export. A first number above 12 is a day under either reading; a
+    second number above 12 is read month-first, because nothing else works.
+    """
+    value = normalise(value)
+    if MONTH_RE.match(value):
+        return value
+
+    iso = ISO_DATE_RE.match(value)
+    if iso:
+        year, month, day = (int(part) for part in iso.groups())
+    else:
+        slashed = SLASH_DATE_RE.match(value)
+        if not slashed:
+            return value
+        day, month, year = (int(part) for part in slashed.groups())
+        if month > 12 and day <= 12:
+            day, month = month, day
+
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        return value
+    return f"{year:04d}-{month:02d}"
 
 
 def parse_fte(text: str) -> int:
@@ -141,8 +183,8 @@ def parse(text: str, teams: list[dict]) -> tuple[list[dict], list[str]]:
 
         name = cell(index[NAME])
         reference = cell(index[REFERENCE])
-        start = cell(index[START])
-        end = cell(index[END])
+        start = month_of(cell(index[START]))
+        end = month_of(cell(index[END]))
 
         if not name:
             errors.append(f"Line {line}: InitiativeName is empty.")
@@ -229,6 +271,10 @@ def parse_demand_summary(text: str, teams: list[dict] | None = None) -> dict:
     rather than normalised — 0.5 stays 0.5 — because the point is to save
     typing, not to reformat.
 
+    Double quotes are dropped wherever they appear. A summary pasted out of a
+    spreadsheet or a CSV cell arrives as "GRC: 1", or GRC: "1", and the quotes
+    are punctuation from the copy rather than anything the user typed.
+
     Returns {"names", "values", "csv", "errors", "unknown"}. Unknown team names
     are a warning, not an error: a summary may be built for another instance.
     """
@@ -241,6 +287,7 @@ def parse_demand_summary(text: str, teams: list[dict] | None = None) -> dict:
 
     for offset, raw in enumerate(text.splitlines()):
         line = offset + 1
+        raw = raw.replace('"', "")  # see the docstring: quotes come from the paste
         if not normalise(raw):
             continue  # blank lines are just spacing
 
