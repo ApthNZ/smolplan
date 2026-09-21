@@ -55,3 +55,45 @@ def test_the_clipboard_fallback_is_still_there():
     source = APP_JS.read_text()
     assert "isSecureContext" in source
     assert "execCommand" in source
+
+
+def test_the_column_width_is_set_on_the_root_not_the_plan():
+    """The plan is rebuilt from scratch on every render, so a width written
+    onto that node is lost the moment anything changes. `--side` is read by
+    `.side` from the cascade, so setting it on documentElement outlives the
+    re-render — and there is nothing to reapply afterwards."""
+    source = APP_JS.read_text()
+    assert 'document.documentElement.style.setProperty("--side"' in source
+
+    setter = re.search(r"function setSideWidth\(.*?\n\}", source, re.DOTALL)
+    assert setter, "setSideWidth is missing"
+    assert ".plan" not in setter.group(0), "the width must not be written onto the plan node"
+
+
+def test_the_resize_grip_is_wired_into_the_plan():
+    source = APP_JS.read_text()
+    assert "sideGrip()" in source
+    plan = re.search(r'\{ class: "plan" \},(.*?)\);', source, re.DOTALL)
+    assert plan and "sideGrip()" in plan.group(1), "the grip is not a child of the plan"
+
+
+def test_the_remembered_width_is_clamped():
+    """A width saved on a wide monitor must not hide the timeline on a laptop,
+    so the clamp is applied on the way in as well as during the drag."""
+    source = APP_JS.read_text()
+    setter = re.search(r"function setSideWidth\(.*?\n\}", source, re.DOTALL).group(0)
+    assert "Math.min" in setter and "Math.max" in setter
+    assert "window.innerWidth" in setter
+    assert re.search(r"function loadSideWidth\(.*?setSideWidth\(", source, re.DOTALL)
+
+
+def test_every_localstorage_access_is_guarded():
+    """A browser set to block site data throws on access rather than returning
+    null, which would take the whole page down at load. Every read and write
+    sits inside a try."""
+    source = APP_JS.read_text()
+    for match in re.finditer(r"localStorage\.(get|set)Item", source):
+        before = source[: match.start()]
+        assert before.rfind("try {") > before.rfind("\n}\n"), (
+            f"unguarded localStorage access at offset {match.start()}"
+        )

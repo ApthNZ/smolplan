@@ -164,6 +164,98 @@ const initiativeTeams = (initiative) => initiative.demand.map((d) => d.team_id);
 const reserveTeams = (reserve) => Object.keys(reserve.lines).map(Number);
 const drawsOnFilteredTeam = (teamIds) => teamFilter === null || teamIds.includes(teamFilter);
 
+// --- the width of the initiative column --------------------------------------
+
+// A long name and a row of team tags compete for the same space, and which one
+// deserves it depends on the plan rather than on the app — so the divider
+// between the list and the timeline is draggable. Like the drawer's wide mode
+// and the month window, the width is a per-browser preference and lives in
+// localStorage; reads and writes are guarded, because a browser set to block
+// site data throws on access rather than returning null.
+const SIDE_WIDTH = "smolplan.sideWidth";
+const SIDE_DEFAULT = 300;
+const SIDE_MIN = 140;
+const SIDE_MAX = 900;
+
+function sideWidth() {
+  const set = parseInt(document.documentElement.style.getPropertyValue("--side"), 10);
+  return Number.isFinite(set) ? set : SIDE_DEFAULT;
+}
+
+function setSideWidth(px, remember = true) {
+  // Leave room for the timeline whatever the window size: dragging the divider
+  // past the right edge would otherwise hide the plan it exists to sit beside.
+  // Measured off the window rather than the plan element so this also holds on
+  // the first paint, before anything is in the document.
+  const max = Math.max(SIDE_MIN, Math.min(SIDE_MAX, window.innerWidth - 220));
+  const width = Math.min(Math.max(Math.round(px), SIDE_MIN), max);
+  document.documentElement.style.setProperty("--side", `${width}px`);
+  if (!remember) return;
+  try {
+    localStorage.setItem(SIDE_WIDTH, String(width));
+  } catch (err) {
+    /* the width still holds for this visit */
+  }
+}
+
+function loadSideWidth() {
+  let saved = null;
+  try {
+    saved = parseInt(localStorage.getItem(SIDE_WIDTH), 10);
+  } catch (err) {
+    saved = null;
+  }
+  if (Number.isFinite(saved)) setSideWidth(saved, false);
+}
+
+function sideGrip() {
+  const grip = el("div", {
+    class: "side-grip",
+    role: "separator",
+    "aria-orientation": "vertical",
+    "aria-label": "Width of the rank and initiative column",
+    tabindex: "0",
+    title: "Drag to set the width of the initiative column. Double-click to reset.",
+  });
+
+  grip.addEventListener("pointerdown", (event) => {
+    // Without this the browser starts a text selection, and the row beneath the
+    // pointer is draggable, so the drag would be handed to the reorder instead.
+    event.preventDefault();
+    const plan = grip.parentElement;
+    const startX = event.clientX;
+    const startWidth = sideWidth();
+
+    const onMove = (e) => setSideWidth(startWidth + (e.clientX - startX), false);
+
+    const onUp = () => {
+      grip.releasePointerCapture(event.pointerId);
+      grip.removeEventListener("pointermove", onMove);
+      grip.removeEventListener("pointerup", onUp);
+      plan.classList.remove("resizing");
+      setSideWidth(sideWidth());  // one write when it settles, not one per pixel
+    };
+
+    plan.classList.add("resizing");
+    grip.setPointerCapture(event.pointerId);
+    grip.addEventListener("pointermove", onMove);
+    grip.addEventListener("pointerup", onUp);
+  });
+
+  grip.addEventListener("dblclick", () => setSideWidth(SIDE_DEFAULT));
+
+  grip.addEventListener("keydown", (e) => {
+    const step = e.shiftKey ? 48 : 16;
+    if (e.key === "ArrowLeft") setSideWidth(sideWidth() - step);
+    else if (e.key === "ArrowRight") setSideWidth(sideWidth() + step);
+    else if (e.key === "Home") setSideWidth(SIDE_DEFAULT);
+    else return;
+    e.preventDefault();
+  });
+
+  return grip;
+}
+
 // --- portfolio ---------------------------------------------------------------
 
 function renderPortfolio() {
@@ -345,7 +437,13 @@ function renderPortfolio() {
     track.append(el("div", { class: "tl-row" }));
   }
 
-  const plan = el("div", { class: "plan" }, side, el("div", { class: "tl-scroll" }, track));
+  const plan = el(
+    "div",
+    { class: "plan" },
+    side,
+    sideGrip(),
+    el("div", { class: "tl-scroll" }, track)
+  );
 
   return el(
     "div",
@@ -445,7 +543,11 @@ function sideRow(initiative) {
     el(
       "span",
       { class: "name" },
-      el("button", { onclick: () => openEditor(initiative), title: "Edit" }, initiative.name)
+      el(
+        "button",
+        { onclick: () => openEditor(initiative), title: `${initiative.name} — click to edit` },
+        initiative.name
+      )
     ),
     tagStrip(initiativeTeams(initiative))
   );
@@ -1704,6 +1806,7 @@ $("#drawer-expand").addEventListener("click", () =>
 $("#drawer-close").addEventListener("click", closeDrawer);
 document.addEventListener("keydown", (e) => e.key === "Escape" && closeDrawer());
 
+loadSideWidth();
 loadRange();
 
 api("GET", "/api/state")

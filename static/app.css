@@ -94,7 +94,19 @@ label { color: var(--muted); display: block; margin-bottom: 2px; }
 
 .plan { display: flex; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
 .side { width: var(--side); flex: none; border-right: 1px solid var(--line); }
-.tl-scroll { overflow-x: auto; flex: 1; }
+.tl-scroll { overflow-x: auto; flex: 1; min-width: 0; }
+
+/* The divider between the list and the timeline, dragged to set how much room
+   the names get before the team tags start eating into them. Wider than it
+   looks so it is catchable with a mouse; touch-action keeps a touch drag from
+   scrolling the page instead. */
+.side-grip {
+  flex: none; width: 5px; cursor: col-resize; touch-action: none;
+  background: transparent;
+}
+.side-grip:hover, .side-grip:focus-visible { background: var(--accent); outline: none; }
+.plan.resizing { cursor: col-resize; user-select: none; }
+.plan.resizing .side-grip { background: var(--accent); }
 
 .head { height: 26px; border-bottom: 1px solid var(--line); background: var(--panel); }
 .side .head { display: flex; align-items: center; padding: 0 8px; color: var(--muted); font-size: 11px; }
