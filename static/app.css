@@ -117,6 +117,10 @@ label { color: var(--muted); display: block; margin-bottom: 2px; }
   text-align: center; padding-top: 6px; border-left: 1px solid var(--line-soft);
 }
 .tl-head div.q1 { border-left-color: var(--line); }
+/* The year is there to be glanced at, not read: smaller and dimmer than the
+   month so a column still says "Sep" first and "which Sep" second. */
+.tl-head .yr { font-style: normal; font-size: 9px; opacity: .65; margin-left: 2px; }
+.tl-head div.now .yr { opacity: .8; }
 .tl-head div.now { color: var(--accent); font-weight: 600; }
 
 .side-row, .tl-row { height: var(--row); border-bottom: 1px solid var(--line-soft); }

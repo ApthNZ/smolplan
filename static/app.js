@@ -54,10 +54,19 @@ const mFrom = (i) =>
 const monthAdd = (month, n) => mFrom(mIndex(month) + n);
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+// The year on every column, not just on January. A plan that runs across two
+// or three years is the normal case, and working out which year a column is in
+// by counting back to the last January is not reading, it is arithmetic.
 function monthLabel(m) {
   const [year, mo] = m.split("-");
-  const name = MONTHS[Number(mo) - 1];
-  return Number(mo) === 1 ? `${name} ${year.slice(2)}` : name;
+  return `${MONTHS[Number(mo) - 1]} ${year.slice(2)}`;
+}
+
+// The same two pieces, for the timeline header, where the year is set smaller
+// and muted so a column still reads as its month first.
+function monthParts(m) {
+  const [year, mo] = m.split("-");
+  return [MONTHS[Number(mo) - 1], year.slice(2)];
 }
 
 // Unambiguous form, for dropdowns and tooltips where there is room.
@@ -284,9 +293,10 @@ function renderPortfolio() {
               Number(m.slice(5)) === 1 ? "q1" : "",
               m === state.settings.current_month ? "now" : "",
             ].join(" "),
-            title: m,
+            title: monthLong(m),
           },
-          monthLabel(m)
+          monthParts(m)[0],
+          el("i", { class: "yr" }, monthParts(m)[1])
         )
       )
     )

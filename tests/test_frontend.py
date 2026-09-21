@@ -97,3 +97,25 @@ def test_every_localstorage_access_is_guarded():
         assert before.rfind("try {") > before.rfind("\n}\n"), (
             f"unguarded localStorage access at offset {match.start()}"
         )
+
+
+def test_every_month_column_carries_its_year():
+    """A plan that spans two or three years is the normal case, and a column
+    labelled only "Mar" means counting back to the last January to place it."""
+    source = APP_JS.read_text()
+    label = re.search(r"function monthLabel\(m\) \{(.*?)\n\}", source, re.DOTALL)
+    assert label, "monthLabel is missing"
+    body = label.group(1)
+    assert "year.slice(2)" in body
+    assert "Number(mo) === 1" not in body, "the year belongs on every month, not only January"
+
+
+def test_the_timeline_header_sets_the_year_apart():
+    """46px per column only fits month and year because the year is smaller and
+    dimmer. Losing the .yr rule would not overflow, it would just go noisy."""
+    source = APP_JS.read_text()
+    assert "monthParts" in source
+    assert 'el("i", { class: "yr" }' in source
+
+    css = (APP_JS.parent / "app.css").read_text()
+    assert ".tl-head .yr" in css
