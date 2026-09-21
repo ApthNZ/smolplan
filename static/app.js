@@ -666,15 +666,42 @@ function startBarDrag(event, initiative, bar, grid, months, locked) {
   bar.addEventListener("pointerup", onUp);
 }
 
+// A shortfall on its own says a plan does not fit; it does not say what it is
+// competing with. The engine hands back the cell's consumers as they stood when
+// this initiative was evaluated — the reserves, plus the higher-ranked work that
+// got in first — which is exactly what is in the way.
+function takenBy(shortfall) {
+  const held = shortfall.taken_by || [];
+  if (!held.length) {
+    // Nothing is competing: the team is simply too small for the ask. Saying
+    // "taken by nothing" would be worse than saying why it is still short.
+    return shortfall.reason === "no_supply_data"
+      ? null
+      : `Nothing else is using ${teamName(shortfall.team_id)} — it supplies `
+        + `${fte(shortfall.supply)} and this needs ${fte(shortfall.wanted)}.`;
+  }
+  const names = held.map(
+    (c) => `${c.name}${c.kind === "reserve" ? " (reserve)" : ""} ${fte(c.fte_h)}`
+  );
+  // With no supply row there is no total to measure the holders against, and
+  // "out of 0.00 supplied" reads as a team with nothing rather than as a team
+  // whose figures were never entered.
+  return shortfall.reason === "no_supply_data"
+    ? `Taken by ${names.join(", ")}.`
+    : `Taken by ${names.join(", ")} — out of ${fte(shortfall.supply)} supplied.`;
+}
+
 function openShortfalls(initiative) {
-  const rows = initiative.shortfalls.map((s) =>
-    el(
+  const rows = initiative.shortfalls.map((s) => {
+    const cause = takenBy(s);
+    return el(
       "li",
       {},
       `${teamName(s.team_id)} ${s.month}: short ${fte(s.short)} `,
-      el("span", { class: "muted" }, s.reason === "no_supply_data" ? "(no supply data)" : "")
-    )
-  );
+      el("span", { class: "muted" }, s.reason === "no_supply_data" ? "(no supply data)" : ""),
+      cause ? el("div", { class: "cause muted" }, cause) : null
+    );
+  });
   drawer(
     el("h2", {}, initiative.name),
     el(

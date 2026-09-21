@@ -119,3 +119,16 @@ def test_the_timeline_header_sets_the_year_apart():
 
     css = (APP_JS.parent / "app.css").read_text()
     assert ".tl-head .yr" in css
+
+
+def test_the_shortfall_list_names_what_holds_the_capacity():
+    """"GRC 2027-02: short 0.25" says a plan does not fit, not what it is
+    competing with. The cause line is the answer, so pin its shape."""
+    source = APP_JS.read_text()
+    cause = re.search(r"function takenBy\(shortfall\) \{(.*?)\n\}", source, re.DOTALL)
+    assert cause, "takenBy is missing"
+    body = cause.group(1)
+    assert "taken_by" in body
+    assert "(reserve)" in body, "a reserve must read differently from an initiative"
+    assert "no_supply_data" in body, "with no supply row there is no total to quote"
+    assert "openShortfalls" in source and "takenBy(s)" in source

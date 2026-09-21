@@ -287,3 +287,20 @@ def test_concurrent_writes_all_succeed(client):
     assert codes == [200] * 8
     names = {t["name"] for t in client.get("/api/state").json()["teams"]}
     assert {f"T{i}" for i in range(8)} <= names
+
+
+def test_a_shortfall_reaches_the_client_with_its_cause(client):
+    """The names are the point: a shortfall the UI cannot explain is a number
+    the user has to go and reconstruct by hand."""
+    state = client.get("/api/state").json()
+    b = by_name(state)["B"]
+    assert b["status"] == "red"
+
+    first = b["shortfalls"][0]
+    assert [(c["kind"], c["name"], c["fte_h"]) for c in first["taken_by"]] == [
+        ("reserve", "BAU", 50),
+        ("reserve", "Unplanned", 25),
+        ("initiative", "A", 50),
+    ]
+    assert first["supply"] == 150
+    assert first["wanted"] == 50

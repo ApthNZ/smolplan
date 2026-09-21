@@ -284,3 +284,70 @@ def test_archived_initiatives_are_excluded():
 
     assert status(result, "A") == "archived"
     assert status(result, "B") == "green"  # A's GRC draw is gone
+
+
+# --- what is causing a shortfall ---------------------------------------------
+
+
+def test_a_shortfall_names_what_holds_the_capacity():
+    """A shortfall says the plan does not fit. This says what it is competing
+    with: the reserves off the top, then the higher-ranked work that got in
+    first. Anything ranked below is irrelevant and must not appear."""
+    result = run()
+    short = result["initiatives"]["B"]["shortfalls"][0]
+
+    assert [(c["kind"], c["name"], c["fte_h"]) for c in short["taken_by"]] == [
+        ("reserve", "BAU", 50),
+        ("reserve", "Unplanned", 25),
+        ("initiative", "A", 50),
+    ]
+    assert short["supply"] == 150
+    assert short["wanted"] == 50
+    # 1.50 supplied, 1.25 held, 0.50 wanted: 0.25 of it cannot be met.
+    assert short["short"] == 25
+
+
+def test_lower_ranked_work_is_not_blamed():
+    """C is ranked below B, so it cannot be why B is red — it is evaluated
+    after B and consumes nothing until B has had its turn."""
+    result = run()
+    for short in result["initiatives"]["B"]["shortfalls"]:
+        assert "C" not in [c["name"] for c in short["taken_by"]]
+
+
+def test_a_red_initiative_never_appears_as_a_consumer():
+    """R4: a red initiative consumes nothing, so it can never be the thing
+    holding capacity away from the work below it."""
+    result = run()
+    assert result["initiatives"]["B"]["status"] == "red"
+    for outcome in result["initiatives"].values():
+        for short in outcome["shortfalls"]:
+            assert "B" not in [c["name"] for c in short["taken_by"]]
+
+
+def test_a_team_too_small_on_its_own_has_no_consumers():
+    """Nothing competing, just not enough capacity. The UI says so rather than
+    listing an empty cause."""
+    result = allocate(
+        teams=["SOC"],
+        supply={("SOC", "2027-01"): 50},
+        reserves=[],
+        initiatives=[{"id": "X", "name": "X", "rank": 1, "start_month": "2027-01"}],
+        demand=[{"initiative_id": "X", "team_id": "SOC", "offset": 0, "fte_h": 100}],
+        current_month="2027-01",
+    )
+    short = result["initiatives"]["X"]["shortfalls"][0]
+    assert short["taken_by"] == []
+    assert short["supply"] == 50
+    assert short["wanted"] == 100
+    assert short["short"] == 50
+
+
+def test_the_consumer_list_is_a_snapshot_not_a_live_reference():
+    """The cell's list keeps growing as lower-ranked work lands, so a shortfall
+    that held a reference to it would gain consumers after the fact."""
+    result = run()
+    first = result["initiatives"]["B"]["shortfalls"][0]
+    cell = result["cells"][("GRC", first["month"])]
+    assert len(first["taken_by"]) <= len(cell["consumers"])
+    assert first["taken_by"] is not cell["consumers"]

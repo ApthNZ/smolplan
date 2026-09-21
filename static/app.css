@@ -215,6 +215,9 @@ label { color: var(--muted); display: block; margin-bottom: 2px; }
 .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
 .toolbar .spacer { flex: 1; }
 
+/* What is holding a team's capacity, under the shortfall it explains. */
+.cause { font-size: 11px; line-height: 1.35; margin: 1px 0 4px; }
+
 /* --- tables ------------------------------------------------------------ */
 
 table { border-collapse: collapse; background: var(--panel); }

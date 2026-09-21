@@ -147,6 +147,11 @@ def allocate(
             cell = cells.get((team, month))
             free = cell["free"] if cell else 0
             if want > free:
+                # Who already holds this cell's capacity. Initiatives are
+                # allocated in rank order, so at this point the cell's consumers
+                # are exactly the reserves plus the higher-ranked work that got
+                # in first — which is the answer to "why is this red". Copied,
+                # because the list keeps growing as lower-ranked work lands.
                 shortfalls.append(
                     {
                         "team_id": team,
@@ -157,6 +162,9 @@ def allocate(
                             if cell and cell["has_supply_row"]
                             else NO_SUPPLY_DATA
                         ),
+                        "wanted": want,
+                        "supply": cell["supply"] if cell else 0,
+                        "taken_by": [dict(c) for c in cell["consumers"]] if cell else [],
                     }
                 )
 
