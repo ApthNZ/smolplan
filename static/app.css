@@ -68,6 +68,18 @@ nav button.on { background: var(--line-soft); border-color: var(--line); color: 
 .clock b { color: var(--text); font-weight: 600; }
 .clock .fake { color: var(--red); }
 
+/* Ctrl+Z is invisible, so the button is how anyone finds out undo exists at
+   all. The count is the other half of that: "Undo" alone does not say whether
+   there is one step behind you or thirty. Built from the theme variables
+   throughout, so there is no dark-mode override to get into the wrong order. */
+.undo { display: flex; align-items: center; gap: 5px; font-size: 12px; padding: 2px 8px; }
+.undo:disabled { opacity: .45; cursor: default; }
+.undo:disabled:hover { border-color: var(--line); }
+.undo .count {
+  font-style: normal; font-size: 10px; font-variant-numeric: tabular-nums;
+  background: var(--line-soft); color: var(--muted); border-radius: 8px; padding: 0 5px;
+}
+
 main { padding: 14px; }
 
 button, input, select {
@@ -80,6 +92,16 @@ button:hover { border-color: var(--muted); }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 button.danger { color: var(--red); }
 button.link { border: none; background: none; padding: 0 2px; color: var(--accent); text-decoration: underline; }
+/* The export download is an anchor, not a button: it carries the filename the
+   server sets and still works from a right-click. It has to look like the
+   buttons beside it. */
+a.button {
+  display: inline-block; text-decoration: none; font: inherit; color: var(--text);
+  background: var(--panel); border: 1px solid var(--line); border-radius: 5px;
+  padding: 3px 7px;
+}
+a.button:hover { border-color: var(--muted); }
+a.button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 input[type=number] { width: 68px; text-align: right; font-variant-numeric: tabular-nums; }
 /* The spinners eat half of a narrow box. Type the number instead. */
 input[type=number]::-webkit-outer-spin-button,
@@ -295,6 +317,17 @@ td.grid-in input { width: 56px; }
   background: var(--red); color: #fff; padding: 8px 14px; border-radius: 6px; z-index: 40;
   max-width: 60ch;
 }
+/* Dark mode's --red is a pale salmon, chosen to read as text on a dark
+   background. As a fill behind white it is barely legible — the same trap the
+   team tags and the utilisation ramp fell into. Dark text on it, and the block
+   sits immediately after the rule it overrides so source order cannot flip. */
+@media (prefers-color-scheme: dark) {
+  #toast { color: var(--bg); }
+}
+/* The toast was only ever an error, so it was only ever red. "Undone: moved B
+   to 2027-07" is not an error, and in red it reads as one. Inverting the two
+   theme colours contrasts in both without needing a dark override. */
+#toast.note { background: var(--text); color: var(--bg); }
 
 .muted { color: var(--muted); }
 

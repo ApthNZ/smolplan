@@ -304,3 +304,350 @@ def test_a_shortfall_reaches_the_client_with_its_cause(client):
     ]
     assert first["supply"] == 150
     assert first["wanted"] == 50
+
+
+# --- undo --------------------------------------------------------------------
+
+
+def test_undo_puts_a_dragged_start_back(client):
+    """The case Ctrl+Z exists for: a bar dropped somewhere, and no memory of
+    where it came from."""
+    b = by_name(client.get("/api/state").json())["B"]
+    assert b["start_month"] == "2027-02" and b["status"] == "red"
+
+    moved = client.patch(f"/api/initiatives/{b['id']}", json={"start_month": "2027-07"}).json()
+    assert by_name(moved)["B"]["status"] == "green"
+
+    back = client.post("/api/undo")
+    assert back.status_code == 200
+    assert back.json()["undone"] == "Moved B to 2027-07."
+    assert by_name(back.json())["B"]["start_month"] == "2027-02"
+    assert by_name(back.json())["B"]["status"] == "red"
+
+
+def test_undo_reaches_back_through_many_changes(client):
+    """"A fair way back", not just the last thing."""
+    b = by_name(client.get("/api/state").json())["B"]
+    for month in ("2027-05", "2027-06", "2027-07", "2027-08", "2027-09"):
+        client.patch(f"/api/initiatives/{b['id']}", json={"start_month": month})
+    assert client.get("/api/state").json()["undo"]["depth"] == 5
+
+    for _ in range(5):
+        assert client.post("/api/undo").status_code == 200
+
+    state = client.get("/api/state").json()
+    assert by_name(state)["B"]["start_month"] == "2027-02"
+    assert state["undo"]["depth"] == 0
+
+
+def test_undo_restores_a_deleted_team_with_everything_that_hung_off_it(client):
+    """The reason undo is a snapshot rather than an inverse operation: deleting
+    a team cascades through supply, reserves and demand, and putting that back
+    by hand would be a second implementation of the schema."""
+    state = client.get("/api/state").json()
+    grc = next(t for t in state["teams"] if t["name"] == "GRC")
+    supply_before = state["supply"][str(grc["id"])]
+    demand_before = by_name(state)["A"]["demand"]
+
+    client.delete(f"/api/teams/{grc['id']}")
+    gone = client.get("/api/state").json()
+    assert [t["name"] for t in gone["teams"]] == ["SOC"]
+
+    restored = client.post("/api/undo").json()
+    assert restored["undone"] == "Deleted the team GRC."
+    assert sorted(t["name"] for t in restored["teams"]) == ["GRC", "SOC"]
+    assert restored["supply"][str(grc["id"])] == supply_before
+    assert by_name(restored)["A"]["demand"] == demand_before
+
+
+def test_undo_takes_back_a_whole_import(client):
+    """An import can touch forty initiatives. It is one action, so it is one
+    checkpoint and one Ctrl+Z."""
+    before = len(client.get("/api/state").json()["initiatives"])
+    csv = (
+        "InitiativeName,Reference,StartMonth,EndMonth,SOC,GRC\n"
+        "Imported one,IMP-1,2027-03,2027-05,0.5,\n"
+        "Imported two,IMP-2,2027-04,2027-06,,0.25\n"
+    )
+    assert client.post("/api/import", json={"csv": csv}).status_code == 200
+    assert len(client.get("/api/state").json()["initiatives"]) == before + 2
+
+    undone = client.post("/api/undo").json()
+    assert undone["undone"] == "Imported 2 rows."
+    assert len(undone["initiatives"]) == before
+    assert "Imported one" not in by_name(undone)
+
+
+def test_one_save_in_the_editor_is_one_undo(client):
+    """The editor saves an initiative as two requests — the fields, then the
+    demand grid. `amend` folds the second into the first so that one click is
+    one press of Ctrl+Z, not two."""
+    state = client.get("/api/state").json()
+    soc = next(t for t in state["teams"] if t["name"] == "SOC")
+    depth = state["undo"]["depth"]
+
+    created = client.post(
+        "/api/initiatives", json={"name": "Delta", "start_month": "2027-05"}
+    ).json()
+    new_id = by_name(created)["Delta"]["id"]
+    client.put(
+        f"/api/initiatives/{new_id}/demand",
+        params={"amend": "1"},
+        json={"lines": [{"team_id": soc["id"], "offset": 0, "fte_h": 50}]},
+    )
+    assert client.get("/api/state").json()["undo"]["depth"] == depth + 1
+
+    undone = client.post("/api/undo").json()
+    assert "Delta" not in by_name(undone)
+    assert undone["undo"]["depth"] == depth
+
+
+def test_a_demand_change_on_its_own_is_undoable(client):
+    """Without amend, a demand replacement checkpoints like anything else."""
+    state = client.get("/api/state").json()
+    soc = next(t for t in state["teams"] if t["name"] == "SOC")
+    a = by_name(state)["A"]
+
+    client.put(
+        f"/api/initiatives/{a['id']}/demand",
+        json={"lines": [{"team_id": soc["id"], "offset": 0, "fte_h": 25}]},
+    )
+    assert by_name(client.get("/api/state").json())["A"]["length"] == 1
+
+    undone = client.post("/api/undo").json()
+    assert undone["undone"] == "Changed the demand for A."
+    assert by_name(undone)["A"]["demand"] == a["demand"]
+
+
+def test_a_rejected_change_leaves_no_checkpoint(client):
+    """The snapshot rides the same transaction as the change it precedes, so a
+    request that fails validation must leave nothing behind — otherwise Ctrl+Z
+    would spend a press undoing something that never happened."""
+    b = by_name(client.get("/api/state").json())["B"]
+    depth = client.get("/api/state").json()["undo"]["depth"]
+
+    refused = client.patch(f"/api/initiatives/{b['id']}", json={"start_month": "2020-01"})
+    assert refused.status_code == 400
+    assert client.get("/api/state").json()["undo"]["depth"] == depth
+
+    duplicate = client.post("/api/teams", json={"name": "SOC"})
+    assert duplicate.status_code == 400
+    assert client.get("/api/state").json()["undo"]["depth"] == depth
+
+
+def test_the_undo_stack_is_capped(client):
+    """Fifty is well past "what did I just drag?"; unbounded is a memory leak
+    with a plan in it."""
+    b = by_name(client.get("/api/state").json())["B"]
+    for n in range(db.UNDO_DEPTH + 5):
+        client.patch(
+            f"/api/initiatives/{b['id']}", json={"name": f"B{n}", "start_month": "2027-02"}
+        )
+    assert client.get("/api/state").json()["undo"]["depth"] == db.UNDO_DEPTH
+
+
+def test_nothing_to_undo_is_refused_not_silently_ignored(client):
+    while client.get("/api/state").json()["undo"]["depth"]:
+        client.post("/api/undo")
+    empty = client.post("/api/undo")
+    assert empty.status_code == 400
+    assert "nothing" in empty.json()["detail"].lower()
+
+
+def test_the_state_names_what_undo_would_take_back(client):
+    """"Undo" on its own is a question. The label is the answer."""
+    state = client.get("/api/state").json()
+    assert state["undo"] == {"depth": 0, "label": None}
+
+    grc = next(t for t in state["teams"] if t["name"] == "GRC")
+    client.post("/api/teams", json={"name": "ENG"})
+    assert client.get("/api/state").json()["undo"]["label"] == "Added the team ENG."
+
+    client.put(
+        "/api/supply",
+        json={"team_id": grc["id"], "from_month": "2027-01", "to_month": "2027-03", "fte_h": 175},
+    )
+    assert (
+        client.get("/api/state").json()["undo"]["label"]
+        == "Set supply for GRC to 1.75 FTE, 2027-01 to 2027-03."
+    )
+
+    ordered = [i["id"] for i in client.get("/api/state").json()["initiatives"]]
+    client.post("/api/initiatives/reorder", json={"ordered_ids": ordered[::-1]})
+    assert client.get("/api/state").json()["undo"]["label"] == "Moved C to rank 1."
+
+
+def test_undoing_a_reserve_edit_restores_the_lines(client):
+    state = client.get("/api/state").json()
+    bau = next(r for r in state["reserves"] if r["name"] == "BAU")
+    soc = next(t for t in state["teams"] if t["name"] == "SOC")
+    before = bau["lines"][str(soc["id"])]
+
+    client.put(
+        f"/api/reserves/{bau['id']}/lines",
+        json={"team_id": soc["id"], "from_month": "2027-01", "to_month": "2027-12", "fte_h": None},
+    )
+    cleared = next(
+        r for r in client.get("/api/state").json()["reserves"] if r["name"] == "BAU"
+    )["lines"][str(soc["id"])]
+    # Only the twelve months asked for; the fixture runs for twenty-four.
+    assert "2027-06" not in cleared and cleared["2028-06"] == 100
+
+    undone = client.post("/api/undo").json()
+    assert next(r for r in undone["reserves"] if r["name"] == "BAU")["lines"][str(soc["id"])] == before
+
+
+# --- reset to zero -----------------------------------------------------------
+
+
+def test_reset_to_zero_empties_the_plan_but_keeps_the_settings(client):
+    client.put("/api/settings", json={"horizon_months": 12, "current_month": "2027-01"})
+    state = client.post("/api/reset").json()
+
+    assert state["teams"] == []
+    assert state["initiatives"] == []
+    assert state["reserves"] == []
+    assert state["supply"] == {}
+    # How you are looking at a plan is not part of one.
+    assert state["settings"]["horizon_months"] == 12
+    assert state["settings"]["current_month"] == "2027-01"
+
+
+def test_reset_to_zero_is_undoable(client):
+    before = client.get("/api/state").json()
+    client.post("/api/reset")
+    undone = client.post("/api/undo").json()
+    assert undone["undone"] == "Reset to an empty plan."
+    assert sorted(t["name"] for t in undone["teams"]) == ["GRC", "SOC"]
+    assert by_name(undone).keys() == by_name(before).keys()
+
+
+def test_reset_to_zero_survives_a_restart(tmp_path):
+    """The startup hook seeds the fixture into a fresh database. An emptied one
+    is not fresh — it is a deliberate blank page — and with the deploy hook
+    rebuilding the container on every commit, reading it as fresh would put the
+    fixture back within the minute."""
+    db.DB_PATH = str(tmp_path / "restart.db")
+    import app as app_module
+
+    conn = db.connect()
+    db.init_db(conn)
+    db.seed_fixture(conn, anchor="2027-01")
+    conn.close()
+
+    with TestClient(app_module.app) as first:
+        assert first.post("/api/reset").json()["teams"] == []
+
+    with TestClient(app_module.app) as second:
+        assert second.get("/api/state").json()["teams"] == [], "the fixture came back"
+
+
+def test_an_untouched_database_is_still_seeded(tmp_path):
+    """The guard must not stop a genuinely new install getting its demo."""
+    db.DB_PATH = str(tmp_path / "fresh.db")
+    import app as app_module
+
+    with TestClient(app_module.app) as fresh:
+        assert sorted(t["name"] for t in fresh.get("/api/state").json()["teams"]) == ["GRC", "SOC"]
+
+
+def test_a_database_predating_the_seeded_flag_is_left_alone(tmp_path):
+    """The flag's first act must not be to declare an existing plan fresh."""
+    path = str(tmp_path / "old.db")
+    db.DB_PATH = path
+    conn = db.connect()
+    db.init_db(conn)
+    db.seed_fixture(conn, anchor="2027-01")
+    conn.execute("UPDATE initiative SET name = 'Real work' WHERE name = 'A'")
+    # Wind the database back to before the flag existed.
+    conn.execute("DELETE FROM setting WHERE key = 'seeded'")
+    conn.commit()
+    conn.close()
+
+    import app as app_module
+
+    with TestClient(app_module.app) as client_:
+        assert "Real work" in by_name(client_.get("/api/state").json())
+
+
+# --- export ------------------------------------------------------------------
+
+
+def export_lines(client):
+    response = client.get("/api/export.csv")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    assert "attachment" in response.headers["content-disposition"]
+    return [line for line in response.text.splitlines() if line]
+
+
+def test_export_is_the_four_identity_columns_in_rank_order(client):
+    lines = export_lines(client)
+    assert lines[0] == "InitiativeName,Reference,StartMonth,EndMonth"
+    # A runs 2027-01 for six months (GRC to offset 5); B for three from 2027-02;
+    # C for three from 2027-04.
+    assert lines[1:] == [
+        "A,,2027-01,2027-06",
+        "B,,2027-02,2027-04",
+        "C,,2027-04,2027-06",
+    ]
+
+
+def test_export_end_month_follows_the_demand_profile(client):
+    state = client.get("/api/state").json()
+    soc = next(t for t in state["teams"] if t["name"] == "SOC")
+    c = by_name(state)["C"]
+    client.put(
+        f"/api/initiatives/{c['id']}/demand",
+        json={"lines": [{"team_id": soc["id"], "offset": o, "fte_h": 25} for o in range(9)]},
+    )
+    assert "C,,2027-04,2027-12" in export_lines(client)
+
+
+def test_export_carries_the_reference_an_import_set(client):
+    csv = (
+        "InitiativeName,Reference,StartMonth,EndMonth,SOC,GRC\n"
+        "Tracked,PRO-77,2027-03,2027-05,0.5,\n"
+    )
+    assert client.post("/api/import", json={"csv": csv}).status_code == 200
+    assert "Tracked,PRO-77,2027-03,2027-05" in export_lines(client)
+
+
+def test_export_leaves_archived_initiatives_out(client):
+    b = by_name(client.get("/api/state").json())["B"]
+    client.patch(f"/api/initiatives/{b['id']}", json={"archived": True})
+    names = [line.split(",")[0] for line in export_lines(client)[1:]]
+    assert names == ["A", "C"]
+
+
+def test_export_neutralises_a_name_that_would_be_a_formula(client):
+    """The file is meant to be opened in a spreadsheet, where a leading "=" is
+    executed rather than displayed."""
+    a = by_name(client.get("/api/state").json())["A"]
+    client.patch(f"/api/initiatives/{a['id']}", json={"name": "=HYPERLINK(\"x\")"})
+    row = next(line for line in export_lines(client) if "HYPERLINK" in line)
+    assert row.startswith("\"'=HYPERLINK")
+
+
+def test_an_initiative_with_no_demand_occupies_its_start_month(client):
+    created = client.post(
+        "/api/initiatives", json={"name": "Empty", "start_month": "2027-08"}
+    ).json()
+    assert created is not None
+    assert "Empty,,2027-08,2027-08" in export_lines(client)
+
+
+def test_the_export_is_not_an_import(client):
+    """Feeding an export back in is refused, and that is the safe answer: an
+    import replaces the demand of every row it matches, so a file with no team
+    columns would quietly empty every profile it touched."""
+    csv = client.get("/api/export.csv").text
+    refused = client.post("/api/import", json={"csv": csv})
+    assert refused.status_code == 400
+    assert any("team column" in e for e in refused.json()["detail"]["errors"])
+
+
+def test_export_touches_nothing(client):
+    before = client.get("/api/state").json()
+    client.get("/api/export.csv")
+    assert client.get("/api/state").json() == before

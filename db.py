@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from datetime import date, datetime, timezone
@@ -60,9 +61,32 @@ CREATE TABLE IF NOT EXISTS setting (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- Undo is a stack of whole-plan snapshots rather than a log of inverse
+-- operations. A plan is a few hundred rows, so a snapshot costs almost
+-- nothing, and "put it back exactly" needs no inverse written for deleting a
+-- team (which cascades through supply, reserves and demand) or for an import
+-- that touched forty initiatives at once.
+CREATE TABLE IF NOT EXISTS undo_snapshot (
+    id          INTEGER PRIMARY KEY,
+    made_at     TEXT NOT NULL,
+    label       TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    payload     TEXT NOT NULL
+);
 """
 
-DEFAULT_SETTINGS = {"horizon_months": "24", "current_month": ""}
+DEFAULT_SETTINGS = {"horizon_months": "24", "current_month": "", "seeded": ""}
+
+# How far back Ctrl+Z reaches. Fifty is well past "what did I just drag?" and
+# still a trivial amount of storage for a plan this size.
+UNDO_DEPTH = 50
+
+# Every table the undo stack captures, ordered so that inserting them in this
+# order never lands a child row before its parent. Deletes run in reverse.
+# `undo_snapshot` is deliberately absent: undoing must not rewrite the history
+# it is walking back through.
+UNDO_TABLES = ("setting", "team", "supply", "reserve", "reserve_line", "initiative", "demand")
 
 
 def connect(path: str | None = None) -> sqlite3.Connection:
@@ -92,6 +116,8 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     for key, value in DEFAULT_SETTINGS.items():
         conn.execute("INSERT OR IGNORE INTO setting (key, value) VALUES (?, ?)", (key, value))
+    _mark_existing_as_seeded(conn)
+    _drop_stale_snapshots(conn)
     conn.commit()
 
 
@@ -105,6 +131,28 @@ def _drop_requested_start_month(conn: sqlite3.Connection) -> None:
     if "requested_start_month" in columns:
         conn.execute("ALTER TABLE initiative DROP COLUMN requested_start_month")
         conn.commit()
+
+
+def _mark_existing_as_seeded(conn: sqlite3.Connection) -> None:
+    """Set the `seeded` flag on a database that predates it.
+
+    The flag exists so that *Reset to zero* survives a restart: without it the
+    startup hook reads an empty team table as a fresh install and puts the
+    fixture straight back. A database that already has teams was seeded long
+    ago, so say so — otherwise this flag's first act would be to declare every
+    existing plan fresh and overwrite it.
+    """
+    row = conn.execute("SELECT value FROM setting WHERE key = 'seeded'").fetchone()
+    if row is not None and row["value"]:
+        return
+    if conn.execute("SELECT 1 FROM team LIMIT 1").fetchone():
+        set_setting(conn, "seeded", "1")
+
+
+def was_seeded(conn: sqlite3.Connection) -> bool:
+    """Has this database ever been populated? An empty plan is not a new one."""
+    row = conn.execute("SELECT value FROM setting WHERE key = 'seeded'").fetchone()
+    return bool(row and row["value"])
 
 
 def _add_reference(conn: sqlite3.Connection) -> None:
@@ -219,6 +267,127 @@ def next_rank(conn) -> int:
     return row["m"] + 1
 
 
+# --- undo --------------------------------------------------------------------
+
+# A snapshot is only restorable by the schema that wrote it. Rather than parse
+# fifty payloads at startup to find out, each one carries the shape it was
+# taken with, and anything that no longer matches is dropped in one statement.
+def _fingerprint(conn) -> str:
+    shape = {
+        table: [r["name"] for r in conn.execute(f"PRAGMA table_info({table})")]
+        for table in UNDO_TABLES
+    }
+    return json.dumps(shape, sort_keys=True, separators=(",", ":"))
+
+
+def _drop_stale_snapshots(conn) -> None:
+    """Discard snapshots this schema could no longer put back.
+
+    A migration that adds or removes a column makes older payloads unusable:
+    the INSERT would fail halfway through a restore, which is far worse than
+    the undo simply not reaching that far back.
+    """
+    conn.execute("DELETE FROM undo_snapshot WHERE fingerprint != ?", (_fingerprint(conn),))
+
+
+def snapshot(conn) -> dict:
+    """Every row of every plan table, as {table: {columns, rows}}."""
+    data = {}
+    for table in UNDO_TABLES:
+        cursor = conn.execute(f"SELECT * FROM {table}")
+        data[table] = {
+            "columns": [d[0] for d in cursor.description],
+            "rows": [list(row) for row in cursor.fetchall()],
+        }
+    return data
+
+
+def checkpoint(conn, label: str, amend: bool = False) -> None:
+    """Record the state *before* a change, so Ctrl+Z can put it back.
+
+    Called at the top of every handler that writes. Nothing commits here: the
+    snapshot rides the same transaction as the change it precedes, so a request
+    that fails validation and raises leaves no checkpoint behind.
+
+    `amend` folds a write into the checkpoint already on top of the stack
+    instead of pushing another. The editor saves an initiative as a create or
+    patch *and* a demand replacement, two requests for one button — without
+    this, undoing that button would take two presses.
+    """
+    if amend and conn.execute("SELECT 1 FROM undo_snapshot LIMIT 1").fetchone():
+        return
+    payload = json.dumps(snapshot(conn), separators=(",", ":"))
+    conn.execute(
+        "INSERT INTO undo_snapshot (made_at, label, fingerprint, payload) VALUES (?, ?, ?, ?)",
+        (now(), label, _fingerprint(conn), payload),
+    )
+    # Keep the newest UNDO_DEPTH and drop the tail.
+    conn.execute(
+        "DELETE FROM undo_snapshot WHERE id NOT IN "
+        "(SELECT id FROM undo_snapshot ORDER BY id DESC LIMIT ?)",
+        (UNDO_DEPTH,),
+    )
+
+
+def undo_state(conn) -> dict:
+    """What the Undo button needs to render: how far back it reaches, and into what."""
+    row = conn.execute(
+        "SELECT label FROM undo_snapshot ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    depth = conn.execute("SELECT COUNT(*) AS n FROM undo_snapshot").fetchone()["n"]
+    return {"depth": depth, "label": row["label"] if row else None}
+
+
+def undo(conn) -> str | None:
+    """Restore the most recent snapshot. Returns its label, or None if empty."""
+    row = conn.execute(
+        "SELECT id, label, payload FROM undo_snapshot ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+
+    data = json.loads(row["payload"])
+    # Children first, so no delete is refused by a foreign key still pointing
+    # at the row being removed.
+    for table in reversed(UNDO_TABLES):
+        conn.execute(f"DELETE FROM {table}")
+    for table in UNDO_TABLES:
+        block = data.get(table)
+        if not block or not block["rows"]:
+            continue
+        # Quoted because one of these columns is "rank", which is a keyword.
+        # The names come from the schema, never from a request.
+        columns = ", ".join(f'"{c}"' for c in block["columns"])
+        marks = ", ".join("?" for _ in block["columns"])
+        conn.executemany(
+            f"INSERT INTO {table} ({columns}) VALUES ({marks})", block["rows"]
+        )
+
+    conn.execute("DELETE FROM undo_snapshot WHERE id = ?", (row["id"],))
+    conn.commit()
+    return row["label"]
+
+
+# --- reset -------------------------------------------------------------------
+
+
+def reset_to_empty(conn) -> None:
+    """Delete every team, reserve and initiative. Destructive.
+
+    Settings are deliberately left alone: the horizon and the clock override
+    are how you are looking at a plan, not part of one, and re-typing them
+    after every reset would be a chore rather than a fresh start.
+
+    The `seeded` flag stays set, which is the whole point — an empty database
+    that has been seeded before is a deliberate blank page, and the startup
+    hook must leave it alone rather than helpfully restoring the fixture.
+    """
+    for table in ("demand", "initiative", "reserve_line", "reserve", "supply", "team"):
+        conn.execute(f"DELETE FROM {table}")
+    set_setting(conn, "seeded", "1")
+    conn.commit()
+
+
 # --- seed --------------------------------------------------------------------
 
 
@@ -297,4 +466,5 @@ def seed_fixture(conn, anchor: str | None = None) -> None:
 
     set_setting(conn, "current_month", anchor if pinned else "")
     set_setting(conn, "horizon_months", "24")
+    set_setting(conn, "seeded", "1")
     conn.commit()

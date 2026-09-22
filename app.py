@@ -6,13 +6,15 @@ private network behind whatever already guards that network. See SECURITY.md.
 
 from __future__ import annotations
 
+import csv
+import io
 import os
 from datetime import date
 
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -41,7 +43,11 @@ async def lifespan(_app: FastAPI):
     conn = db.connect()
     try:
         db.init_db(conn)
-        if not conn.execute("SELECT 1 FROM team LIMIT 1").fetchone():
+        # `was_seeded`, not "are there any teams": *Reset to zero* leaves a
+        # deliberately empty database behind, and reading that as a fresh
+        # install would put the fixture back on the next restart — which, with
+        # the deploy-on-commit hook, is often within the minute.
+        if not db.was_seeded(conn):
             db.seed_fixture(conn)
     finally:
         conn.close()
@@ -103,6 +109,68 @@ def guarded(fn, *args):
         return fn(*args)
     except ValueError as exc:
         bad(str(exc))
+
+
+# --- undo labels -------------------------------------------------------------
+
+# Every checkpoint carries a sentence saying what it is about to undo, because
+# "Undo" on its own is a question rather than an offer — after three drags and
+# a supply edit, the only useful thing a button can say is which one it will
+# take back. The names are read before the change, so a delete can still say
+# what it deleted.
+
+
+def _name_of(conn, table: str, row_id: int, fallback: str) -> str:
+    # `table` is a literal from the call sites below, never from a request.
+    row = conn.execute(f"SELECT name FROM {table} WHERE id = ?", (row_id,)).fetchone()
+    return row["name"] if row else fallback
+
+
+def _team_name(conn, team_id: int) -> str:
+    return _name_of(conn, "team", team_id, "a team")
+
+
+def _reserve_name(conn, reserve_id: int) -> str:
+    return _name_of(conn, "reserve", reserve_id, "a reserve")
+
+
+def _initiative_name(conn, initiative_id: int) -> str:
+    return _name_of(conn, "initiative", initiative_id, "an initiative")
+
+
+def _fill_label(what: str, conn, payload, months: list[str]) -> str:
+    team = _team_name(conn, payload.team_id)
+    span = months[0] if len(months) == 1 else f"{months[0]} to {months[-1]}"
+    if payload.fte_h is None:
+        return f"Cleared {what} for {team}, {span}."
+    return f"Set {what} for {team} to {payload.fte_h / 100:.2f} FTE, {span}."
+
+
+def _patch_label(row, fields: dict) -> str:
+    """Name the one change that matters, in the order a user would notice it.
+
+    A drag sends only start_month; the editor's Save sends the lot, so the
+    checks are ordered by which is worth reporting rather than by which
+    arrived.
+    """
+    if "start_month" in fields and fields["start_month"] != row["start_month"]:
+        return f"Moved {row['name']} to {fields['start_month']}."
+    if "archived" in fields and bool(fields["archived"]) != bool(row["archived"]):
+        return f"{'Archived' if fields['archived'] else 'Restored'} {row['name']}."
+    if "name" in fields and fields["name"].strip() != row["name"]:
+        return f"Renamed {row['name']} to {fields['name'].strip()}."
+    return f"Edited {row['name']}."
+
+
+def _reorder_label(conn, ordered_ids: list[int]) -> str:
+    rows = conn.execute('SELECT id, name FROM initiative ORDER BY "rank"').fetchall()
+    before = [r["id"] for r in rows]
+    if before == ordered_ids:
+        return "Re-ranked the portfolio."
+    # A drag moves one row; the one that travelled furthest is the one dragged.
+    names = {r["id"]: r["name"] for r in rows}
+    moved = max(ordered_ids, key=lambda i: abs(ordered_ids.index(i) - before.index(i)))
+    return f"Moved {names[moved]} to rank {ordered_ids.index(moved) + 1}."
 
 
 # --- state -------------------------------------------------------------------
@@ -177,6 +245,7 @@ def build_state(conn) -> dict:
         "initiatives": initiatives,
         "cells": cells,
         "months": display_months,
+        "undo": db.undo_state(conn),
         "settings": {
             "horizon_months": horizon,
             "current_month": current,
@@ -211,6 +280,7 @@ def create_team(payload: TeamIn, conn=Depends(get_conn)):
     exists = conn.execute("SELECT 1 FROM team WHERE name = ?", (payload.name,)).fetchone()
     if exists:
         bad(f"There is already a team called {payload.name}.")
+    db.checkpoint(conn, f"Added the team {payload.name.strip()}.")
     conn.execute("INSERT INTO team (name) VALUES (?)", (payload.name.strip(),))
     conn.commit()
     return build_state(conn)
@@ -218,6 +288,7 @@ def create_team(payload: TeamIn, conn=Depends(get_conn)):
 
 @app.patch("/api/teams/{team_id}")
 def rename_team(team_id: int, payload: TeamIn, conn=Depends(get_conn)):
+    db.checkpoint(conn, f"Renamed a team to {payload.name.strip()}.")
     conn.execute("UPDATE team SET name = ? WHERE id = ?", (payload.name.strip(), team_id))
     conn.commit()
     return build_state(conn)
@@ -225,6 +296,7 @@ def rename_team(team_id: int, payload: TeamIn, conn=Depends(get_conn)):
 
 @app.delete("/api/teams/{team_id}")
 def delete_team(team_id: int, conn=Depends(get_conn)):
+    db.checkpoint(conn, f"Deleted the team {_team_name(conn, team_id)}.")
     conn.execute("DELETE FROM team WHERE id = ?", (team_id,))
     conn.commit()
     return build_state(conn)
@@ -245,6 +317,7 @@ def fill_supply(payload: FillIn, conn=Depends(get_conn)):
     months = guarded(validate_span, payload.from_month, payload.to_month)
     if payload.fte_h is not None:
         guarded(validate_fte, payload.fte_h)
+    db.checkpoint(conn, _fill_label("supply", conn, payload, months))
     for month in months:
         if payload.fte_h is None:
             conn.execute(
@@ -266,6 +339,7 @@ class ReserveIn(BaseModel):
 
 @app.post("/api/reserves")
 def create_reserve(payload: ReserveIn, conn=Depends(get_conn)):
+    db.checkpoint(conn, f"Added the reserve {payload.name.strip()}.")
     order = conn.execute(
         "SELECT COALESCE(MAX(sort_order), 0) + 1 AS n FROM reserve"
     ).fetchone()["n"]
@@ -278,6 +352,7 @@ def create_reserve(payload: ReserveIn, conn=Depends(get_conn)):
 
 @app.delete("/api/reserves/{reserve_id}")
 def delete_reserve(reserve_id: int, conn=Depends(get_conn)):
+    db.checkpoint(conn, f"Deleted the reserve {_reserve_name(conn, reserve_id)}.")
     conn.execute("DELETE FROM reserve WHERE id = ?", (reserve_id,))
     conn.commit()
     return build_state(conn)
@@ -288,6 +363,9 @@ def fill_reserve(reserve_id: int, payload: FillIn, conn=Depends(get_conn)):
     months = guarded(validate_span, payload.from_month, payload.to_month)
     if payload.fte_h:
         guarded(validate_fte, payload.fte_h)
+    db.checkpoint(
+        conn, _fill_label(_reserve_name(conn, reserve_id), conn, payload, months)
+    )
     for month in months:
         if payload.fte_h is None or payload.fte_h == 0:
             conn.execute(
@@ -327,6 +405,7 @@ class InitiativePatch(BaseModel):
 def create_initiative(payload: InitiativeIn, conn=Depends(get_conn)):
     current = current_month(conn)
     guarded(validate_start_month, payload.start_month, current)
+    db.checkpoint(conn, f"Created {payload.name.strip()}.")
     stamp = db.now()
     conn.execute(
         'INSERT INTO initiative (name, "rank", start_month, '
@@ -348,7 +427,7 @@ def create_initiative(payload: InitiativeIn, conn=Depends(get_conn)):
 @app.patch("/api/initiatives/{initiative_id}")
 def update_initiative(initiative_id: int, payload: InitiativePatch, conn=Depends(get_conn)):
     row = conn.execute(
-        "SELECT start_month FROM initiative WHERE id = ?", (initiative_id,)
+        "SELECT name, start_month, archived FROM initiative WHERE id = ?", (initiative_id,)
     ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="No such initiative.")
@@ -360,6 +439,8 @@ def update_initiative(initiative_id: int, payload: InitiativePatch, conn=Depends
         # R8: a start cannot be moved into the past. Whether the initiative has
         # already started makes no difference — it can always be pushed out.
         guarded(validate_start_month, fields["start_month"], current)
+
+    db.checkpoint(conn, _patch_label(row, fields))
 
     editable = {"name", "start_month", "owner", "notes", "archived"}
     for key, value in fields.items():
@@ -379,6 +460,7 @@ def update_initiative(initiative_id: int, payload: InitiativePatch, conn=Depends
 
 @app.delete("/api/initiatives/{initiative_id}")
 def delete_initiative(initiative_id: int, conn=Depends(get_conn)):
+    db.checkpoint(conn, f"Deleted {_initiative_name(conn, initiative_id)}.")
     conn.execute("DELETE FROM initiative WHERE id = ?", (initiative_id,))
     remaining = [
         r["id"]
@@ -398,6 +480,7 @@ def reorder(payload: ReorderIn, conn=Depends(get_conn)):
     known = {r["id"] for r in conn.execute("SELECT id FROM initiative").fetchall()}
     if set(payload.ordered_ids) != known:
         bad("The reorder must list every initiative exactly once.")
+    db.checkpoint(conn, _reorder_label(conn, payload.ordered_ids))
     db.renumber_ranks(conn, payload.ordered_ids)
     conn.commit()
     return build_state(conn)
@@ -414,7 +497,15 @@ class DemandIn(BaseModel):
 
 
 @app.put("/api/initiatives/{initiative_id}/demand")
-def replace_demand(initiative_id: int, payload: DemandIn, conn=Depends(get_conn)):
+def replace_demand(
+    initiative_id: int, payload: DemandIn, amend: bool = False, conn=Depends(get_conn)
+):
+    """Replace an initiative's demand profile.
+
+    `amend=1` says this is the second half of one user action — the editor
+    saves a create-or-patch and then the grid — and folds it into the
+    checkpoint that request already took, so one Save is one Ctrl+Z.
+    """
     seen = set()
     for line in payload.lines:
         guarded(validate_fte, line.fte_h)
@@ -424,6 +515,9 @@ def replace_demand(initiative_id: int, payload: DemandIn, conn=Depends(get_conn)
             bad("Duplicate team and offset in the demand grid.")
         seen.add((line.team_id, line.offset))
 
+    db.checkpoint(
+        conn, f"Changed the demand for {_initiative_name(conn, initiative_id)}.", amend=amend
+    )
     conn.execute("DELETE FROM demand WHERE initiative_id = ?", (initiative_id,))
     for line in payload.lines:
         if line.fte_h > 0:
@@ -466,6 +560,7 @@ class SettingsIn(BaseModel):
 
 @app.put("/api/settings")
 def update_settings(payload: SettingsIn, conn=Depends(get_conn)):
+    db.checkpoint(conn, "Changed the settings.")
     if payload.horizon_months is not None:
         db.set_setting(conn, "horizon_months", str(payload.horizon_months))
     if payload.current_month is not None:
@@ -504,6 +599,7 @@ def import_csv(payload: ImportIn, conn=Depends(get_conn)):
         )
 
     before = {i["id"]: i["status"] for i in build_state(conn)["initiatives"]}
+    db.checkpoint(conn, f"Imported {len(rows)} row{'s' if len(rows) != 1 else ''}.")
 
     existing = {
         (r["reference"] or "").lower(): r["id"]
@@ -585,8 +681,99 @@ def convert_summary(payload: ConvertIn, conn=Depends(get_conn)):
 
 @app.post("/api/seed")
 def reseed(conn=Depends(get_conn)):
+    db.checkpoint(conn, "Reset to the fixture.")
     db.seed_fixture(conn)
     return build_state(conn)
+
+
+@app.post("/api/reset")
+def reset(conn=Depends(get_conn)):
+    """Empty the plan completely, for setting one up from scratch.
+
+    Checkpointed like any other change, so an accidental reset is one Ctrl+Z
+    away for as long as the page stays open.
+    """
+    db.checkpoint(conn, "Reset to an empty plan.")
+    db.reset_to_empty(conn)
+    return build_state(conn)
+
+
+@app.post("/api/undo")
+def undo(conn=Depends(get_conn)):
+    label = db.undo(conn)
+    if label is None:
+        bad("There is nothing left to undo.")
+    return {**build_state(conn), "undone": label}
+
+
+# --- export ------------------------------------------------------------------
+
+EXPORT_COLUMNS = ["InitiativeName", "Reference", "StartMonth", "EndMonth"]
+
+# A cell opened in a spreadsheet and starting with one of these is a formula,
+# not text, so a name is prefixed with an apostrophe before it can become one.
+# Excel and LibreOffice both show the text and drop the apostrophe. No ordinary
+# initiative name starts with any of them, so nothing legitimate is altered.
+FORMULA_LEADERS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def csv_safe(value: str) -> str:
+    return f"'{value}" if value.startswith(FORMULA_LEADERS) else value
+
+
+def export_rows(conn) -> list[list[str]]:
+    """Every live initiative as name, reference, start and end.
+
+    Four columns and no more. The import's team columns carry one FTE for the
+    whole span, and a profile dialled in month by month cannot be written that
+    way without quietly flattening it — so the FTE is not exported at all
+    rather than exported wrong. What comes out is what identifies a piece of
+    work and when it runs, which is what another tracker wants to be told.
+
+    Archived initiatives are left out: "set aside" is not one of these four
+    columns, so exporting them would present them as live work.
+    """
+    initiatives = conn.execute(
+        'SELECT id, name, reference, start_month FROM initiative '
+        'WHERE archived = 0 ORDER BY "rank"'
+    ).fetchall()
+    # An initiative with no demand at all still occupies its start month.
+    lengths = {
+        r["initiative_id"]: r["last"] + 1
+        for r in conn.execute(
+            "SELECT initiative_id, MAX(offset_m) AS last FROM demand GROUP BY initiative_id"
+        )
+    }
+    return [
+        [
+            csv_safe(row["name"]),
+            csv_safe(row["reference"] or ""),
+            row["start_month"],
+            engine.month_add(row["start_month"], lengths.get(row["id"], 1) - 1),
+        ]
+        for row in initiatives
+    ]
+
+
+def export_csv(conn) -> str:
+    out = io.StringIO()
+    writer = csv.writer(out)  # CRLF by default, which is what a spreadsheet wants
+    writer.writerow(EXPORT_COLUMNS)
+    writer.writerows(export_rows(conn))
+    return out.getvalue()
+
+
+@app.get("/api/export.csv")
+def export(conn=Depends(get_conn)):
+    """Download the plan's initiatives as CSV. Touches no data."""
+    return Response(
+        content=export_csv(conn),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition":
+                f'attachment; filename="smolplan-{date.today().isoformat()}.csv"'
+        },
+    )
 
 
 # --- static ------------------------------------------------------------------

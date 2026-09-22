@@ -9,6 +9,9 @@ let teamFilter = null; // team id, or null for every team
 let importResult = null; // summary of the last successful import
 let monthFrom = null; // narrowed display window; null means the whole horizon
 let monthTo = null;
+let exportCsv = null; // the export, as the server renders it; null means refetch
+let exportPending = false;
+let undoing = false; // one undo at a time, however hard Ctrl+Z is held
 
 // --- helpers -----------------------------------------------------------------
 
@@ -75,9 +78,13 @@ function monthLong(m) {
   return `${MONTHS[Number(mo) - 1]} ${year}`;
 }
 
-function toast(message) {
+// `kind` defaults to an error, because that is what every existing caller is
+// reporting. Confirmations pass "note" so that a message saying a thing worked
+// does not arrive in the colour reserved for one that did not.
+function toast(message, kind = "error") {
   const box = $("#toast");
   box.textContent = message;
+  box.className = kind === "note" ? "note" : "";
   box.hidden = false;
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => (box.hidden = true), 4000);
@@ -97,13 +104,78 @@ async function api(method, path, body) {
   return data;
 }
 
+// Every path that replaces the plan goes through here. The export preview is
+// fetched from the server and kept, so it has to be dropped whenever the thing
+// it was built from moves on — and "whenever" is easier to get right in one
+// place than at six call sites. tests/test_frontend.py enforces the funnel.
+function setState(next) {
+  state = next;
+  exportCsv = null;
+  return next;
+}
+
 async function send(method, path, body) {
   try {
-    state = await api(method, path, body);
+    setState(await api(method, path, body));
     render();
   } catch (err) {
     toast(err.message);
   }
+}
+
+// --- undo --------------------------------------------------------------------
+
+// The stack lives on the server, because that is where the plan lives: every
+// change already round-trips, and a snapshot taken beside the write can put
+// back a deleted team with its supply, reserves and demand intact — which no
+// inverse operation written in here could do. It also means a second tab, and
+// a reloaded page, undo the same history rather than each keeping their own.
+
+async function undoLast() {
+  if (undoing) return;
+  const depth = (state && state.undo && state.undo.depth) || 0;
+  if (!depth) {
+    toast("Nothing left to undo.");
+    return;
+  }
+  undoing = true;
+  try {
+    const data = setState(await api("POST", "/api/undo"));
+    // The drawer may be showing an initiative that has just stopped existing.
+    closeDrawer();
+    render();
+    toast(`Undone: ${data.undone}`, "note");
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    undoing = false;
+  }
+}
+
+function renderUndo() {
+  const button = $("#undo");
+  const { depth, label } = (state && state.undo) || { depth: 0, label: null };
+  button.disabled = !depth;
+  button.title = depth
+    ? `Undo: ${label} \u2014 Ctrl+Z, ${depth} step${depth === 1 ? "" : "s"} available`
+    : "Nothing to undo";
+  setChildren(
+    button,
+    el("span", {}, "\u21b6 Undo"),
+    depth ? el("i", { class: "count" }, depth) : null
+  );
+}
+
+// Ctrl+Z inside a text box is the browser undoing what is being typed, and
+// taking that away to undo the plan instead would be worse than having no
+// shortcut at all. Shift+Ctrl+Z is conventionally redo, which does not exist
+// here, so it is left alone rather than quietly treated as another undo.
+function isTyping(node) {
+  return !!(
+    node &&
+    (node.isContentEditable ||
+      (node.closest && node.closest("input, textarea, select")))
+  );
 }
 
 function drawer(...content) {
@@ -842,7 +914,7 @@ function openEditor(initiative) {
           owner: ownerInput.value,
           notes: notesInput.value,
         });
-        state = created;
+        setState(created);
         id = Math.max(...state.initiatives.map((i) => i.id));
       } else {
         const patch = {
@@ -851,9 +923,12 @@ function openEditor(initiative) {
           notes: notesInput.value,
         };
         patch.start_month = startSelect.value;
-        state = await api("PATCH", `/api/initiatives/${id}`, patch);
+        setState(await api("PATCH", `/api/initiatives/${id}`, patch));
       }
-      state = await api("PUT", `/api/initiatives/${id}/demand`, { lines });
+      // amend=1: this is the second half of one Save, so it folds into the
+      // checkpoint the create or patch above already took. Without it, undoing
+      // one click would take two presses.
+      setState(await api("PUT", `/api/initiatives/${id}/demand?amend=1`, { lines }));
       render();
       closeDrawer();
     } catch (err) {
@@ -1450,7 +1525,7 @@ function importPanel() {
         );
         return;
       }
-      state = data;
+      setState(data);
       importResult = data.import;
       render();
     } catch (err) {
@@ -1504,6 +1579,99 @@ function importPanel() {
   );
 }
 
+// The server renders the export, and this panel shows what it rendered rather
+// than rebuilding it here. One definition of what an export is, not two that
+// can drift apart over a detail like escaping a leading "=".
+function exportPanel() {
+  const preview = el("textarea", {
+    rows: "6",
+    readonly: "readonly",
+    spellcheck: "false",
+    style: "width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px",
+  });
+  const result = el("div", { class: "import-result" });
+
+  if (exportCsv === null) {
+    preview.value = "Loading\u2026";
+    if (!exportPending) {
+      exportPending = true;
+      fetch("/api/export.csv")
+        .then((response) => response.text())
+        .then((text) => {
+          exportCsv = text;
+          exportPending = false;
+          // Only repaint if this is still the tab being looked at.
+          if (view === "convert") render();
+        })
+        .catch(() => {
+          exportPending = false;
+          preview.value = "Could not build the export.";
+        });
+    }
+  } else {
+    preview.value = exportCsv;
+  }
+
+  const archived = state.initiatives.filter((i) => i.archived).length;
+  const rows = exportCsv === null ? null : exportCsv.trim().split(/\r?\n/).length - 1;
+  const missing = state.initiatives.filter((i) => !i.archived && !i.reference).length;
+
+  return el(
+    "div",
+    {},
+    el("p", { class: "muted" },
+      "Every initiative in the plan as four columns \u2014 name, reference, start "
+      + "month and end month \u2014 for pushing back into an issue tracker. The end "
+      + "month is worked out from the demand profile: the start month plus however "
+      + "many months it runs for."),
+    el("ul", { class: "import-notes muted" },
+      el("li", {},
+        el("b", {}, "No team columns, and no FTE. "),
+        "An import gives a team one figure for the whole span, and a profile "
+        + "dialled in month by month cannot be written that way. Rather than "
+        + "flatten it and export a number you did not enter, the FTE is left out."),
+      el("li", {},
+        el("b", {}, "This is not a backup. "),
+        "Teams, supply, reserves, rank, owner, notes and archived state are not in "
+        + "these four columns. Feeding this file back into the import above is "
+        + "refused \u2014 it has no team columns \u2014 which is the safe answer, because "
+        + "an import replaces the demand of every row it matches."),
+      el("li", {}, "Archived initiatives are left out: \u201cset aside\u201d is not one of "
+        + "the four columns, so exporting them would present them as live work."),
+      el("li", {}, "Rows come out in rank order.")),
+    el("div", { class: "row", style: "margin:10px 0" },
+      el("a",
+        {
+          class: "button primary",
+          href: "/api/export.csv",
+          download: "",
+          onclick: () => setChildren(result, el("p", { class: "muted" }, "Downloaded.")),
+        },
+        "Download CSV"),
+      el("button",
+        {
+          onclick: () =>
+            copyFrom(preview, (message) =>
+              setChildren(result, el("p", { class: "muted" }, message))),
+        },
+        "Copy")),
+    preview,
+    rows === null
+      ? null
+      : el("p", { class: "muted", style: "margin-top:6px" },
+          `${rows} initiative${rows === 1 ? "" : "s"} in the file`
+          + (archived ? `, ${archived} archived one${archived === 1 ? "" : "s"} left out` : "")
+          + "."),
+    missing
+      ? el("p", { class: "muted" },
+          `${missing} of them ${missing === 1 ? "has" : "have"} no Reference. A tracker `
+          + "matching on that key will create new issues for those rather than update "
+          + "existing ones.")
+      : null,
+    result
+  );
+}
+
 function renderConvert() {
   return el(
     "div",
@@ -1511,7 +1679,9 @@ function renderConvert() {
     el("h2", {}, "Convert a demand summary"),
     converterPanel(),
     el("h2", { style: "margin-top:26px" }, "Import from CSV"),
-    importPanel()
+    importPanel(),
+    el("h2", { style: "margin-top:26px" }, "Export to CSV"),
+    exportPanel()
   );
 }
 
@@ -1555,21 +1725,46 @@ function renderSettings() {
         "Save settings"
       )
     ),
-    el("h3", {}, "Fixture"),
+    el("h3", {}, "Start again"),
     el(
       "p",
       { class: "muted" },
-      "Reset everything to the demo fixture: teams SOC and GRC, and initiatives " +
-        "A, B and C laid out from the current month, with B short of GRC."
+      "Both of these delete every team, reserve and initiative. Neither touches " +
+        "the horizon or the clock override above \u2014 those are how you are looking " +
+        "at a plan, not part of one. Both are undoable with Ctrl+Z while this " +
+        "page stays open."
     ),
     el(
-      "button",
-      {
-        class: "danger",
-        onclick: () =>
-          confirm("Delete all data and reload the fixture?") && send("POST", "/api/seed"),
-      },
-      "Reset to fixture"
+      "div",
+      { class: "row" },
+      el(
+        "button",
+        {
+          class: "danger",
+          title: "Teams SOC and GRC, initiatives A, B and C, with B short of GRC",
+          onclick: () =>
+            confirm("Delete all data and reload the fixture?") && send("POST", "/api/seed"),
+        },
+        "Reset to fixture"
+      ),
+      el(
+        "button",
+        {
+          class: "danger",
+          title: "An empty plan: no teams, no reserves, no initiatives",
+          onclick: () =>
+            confirm(
+              "Delete every team, reserve and initiative, leaving an empty plan?"
+            ) && send("POST", "/api/reset"),
+        },
+        "Reset to zero"
+      )
+    ),
+    el(
+      "p",
+      { class: "muted", style: "margin-top:6px" },
+      "\u201cReset to zero\u201d leaves the plan empty and keeps it that way. Adding the " +
+        "first team is the start of setting one up from scratch."
     )
   );
 }
@@ -1797,6 +1992,7 @@ function render() {
     button.classList.toggle("on", button.dataset.view === view);
   }
   setChildren($("#range"), renderRange());
+  renderUndo();
   const settings = state.settings;
   setChildren($("#clock"), 
     el("span", {}, "Current month "),
@@ -1843,12 +2039,20 @@ $("#drawer-expand").addEventListener("click", () =>
 $("#drawer-close").addEventListener("click", closeDrawer);
 document.addEventListener("keydown", (e) => e.key === "Escape" && closeDrawer());
 
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "z" && event.key !== "Z") return;
+  if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return;
+  if (isTyping(event.target)) return;
+  event.preventDefault();
+  undoLast();
+});
+
 loadSideWidth();
 loadRange();
 
 api("GET", "/api/state")
   .then((data) => {
-    state = data;
+    setState(data);
     render();
   })
   .catch((err) => toast(err.message));

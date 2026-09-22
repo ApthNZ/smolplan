@@ -29,6 +29,7 @@ oversight.
 | Path traversal | ✅ | Static files are served by Starlette's `StaticFiles`, which resolves and confines paths. Covered by tests. |
 | Secrets in the tree | ✅ | None exist — the app has no API keys, tokens or passwords. A test scans for them anyway. |
 | Database exposure | ✅ | `SMOLPLAN_DB` is deployment configuration, never user input; no route reflects it. |
+| CSV formula injection | ✅ | The export prefixes any field starting with `=`, `+`, `-`, `@`, tab or CR with an apostrophe, so a name cannot become a formula when the file is opened in a spreadsheet. No ordinary initiative name starts with one of those, so nothing legitimate is altered. |
 | SSRF | N/A | The app makes no outbound requests. |
 | CSRF | ⚠️ Accepted | No cookies and no auth, so there is no session to ride. If auth is ever added, CSRF protection must be added with it. |
 | Authentication | ⚠️ Accepted | None. See above. |
@@ -47,6 +48,7 @@ oversight.
 
 `tests/test_security.py` — 22 tests covering injection through every field the
 API accepts, the column allowlist, month and FTE validation, static-path
-traversal, and a secret scan over the source tree.
+traversal, and a secret scan over the source tree. Formula neutralisation in the
+export is covered in `tests/test_api.py`, alongside the rest of its behaviour.
 
-Run with `pytest -q` alongside the engine and API suites.
+Run with `pytest -q` alongside the engine, API and frontend suites.

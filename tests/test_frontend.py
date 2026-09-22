@@ -132,3 +132,85 @@ def test_the_shortfall_list_names_what_holds_the_capacity():
     assert "(reserve)" in body, "a reserve must read differently from an initiative"
     assert "no_supply_data" in body, "with no supply row there is no total to quote"
     assert "openShortfalls" in source and "takenBy(s)" in source
+
+
+def test_ctrl_z_stands_aside_inside_a_text_box():
+    """This page is mostly number boxes. Taking Ctrl+Z away from the field the
+    cursor is in, to undo the plan instead, would be worse than having no
+    shortcut: the keystroke would silently do something far away from where the
+    user is looking, and the half-typed number would be beyond recall."""
+    source = APP_JS.read_text()
+    guard = re.search(r"function isTyping\(node\) \{(.*?)\n\}", source, re.DOTALL)
+    assert guard, "isTyping is missing"
+    body = guard.group(1)
+    assert "input, textarea, select" in body
+    assert "isContentEditable" in body
+
+    handler = re.search(
+        r'document\.addEventListener\("keydown", \(event\) => \{(.*?)\n\}\);',
+        source,
+        re.DOTALL,
+    )
+    assert handler, "the Ctrl+Z handler is missing"
+    assert "isTyping(event.target)" in handler.group(1)
+    # Shift+Ctrl+Z is redo, which does not exist here. Undoing on it would be a
+    # surprise, not a convenience.
+    assert "event.shiftKey" in handler.group(1)
+
+
+def test_the_undo_button_exists_and_says_how_far_back_it_reaches():
+    """Ctrl+Z is invisible. The button is the only thing that says undo exists,
+    and the count is the only thing that says whether it reaches past the last
+    change."""
+    source = APP_JS.read_text()
+    html = (APP_JS.parent / "index.html").read_text()
+    assert 'id="undo"' in html, "no undo button in the header"
+
+    render = re.search(r"function renderUndo\(\) \{(.*?)\n\}", source, re.DOTALL)
+    assert render, "renderUndo is missing"
+    body = render.group(1)
+    assert "state.undo" in body
+    assert "depth" in body and "label" in body
+    assert "button.disabled" in body, "an undo button that cannot undo must say so"
+    assert "renderUndo()" in re.search(
+        r"function render\(\) \{(.*?)\n\}", source, re.DOTALL
+    ).group(1), "renderUndo is never called from render"
+
+
+def test_the_editor_folds_its_second_request_into_one_undo():
+    """Saving an initiative is a create-or-patch and then a demand
+    replacement — two requests for one button. Without amend, undoing that
+    button takes two presses, and the first one leaves a half-saved
+    initiative on screen."""
+    source = APP_JS.read_text()
+    assert "/demand?amend=1" in source, "the editor's demand save is not amended"
+
+
+def test_the_export_panel_shows_what_the_server_rendered():
+    """Rebuilding the CSV here would be a second definition of what an export
+    is, and the two would drift over exactly the details that matter — which
+    rows are left out, how a leading "=" is escaped."""
+    source = APP_JS.read_text()
+    panel = re.search(r"function exportPanel\(\) \{(.*?)\n\}", source, re.DOTALL)
+    assert panel, "exportPanel is missing"
+    body = panel.group(1)
+    assert "/api/export.csv" in body, "the panel does not fetch the server's export"
+    assert "InitiativeName" not in body, "the panel is building its own CSV"
+
+
+def test_replacing_the_plan_goes_through_one_place():
+    """The export preview is fetched from the server and kept, so it has to be
+    dropped whenever the plan it was built from moves on. Six call sites
+    replace `state`; remembering at all six is how a stale preview ships. They
+    all go through setState, and only setState assigns."""
+    source = APP_JS.read_text()
+    setters = re.findall(r"^\s*state = .*$", source, re.MULTILINE)
+    assert setters == ["  state = next;"], (
+        f"state is assigned outside setState: {setters}"
+    )
+
+    helper = re.search(r"function setState\(next\) \{(.*?)\n\}", source, re.DOTALL)
+    assert helper, "setState is missing"
+    assert "exportCsv = null" in helper.group(1), (
+        "setState does not drop the cached export"
+    )

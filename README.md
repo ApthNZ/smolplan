@@ -53,7 +53,7 @@ it. On a Windows laptop, see [docs/windows.md](docs/windows.md).
 The database is created on first run and seeded with a demo anchored on the
 current month: teams SOC and GRC, initiatives A, B and C, and B short of GRC
 capacity so there's a red bar to play with immediately. Settings → *Reset to
-fixture* puts it back.
+fixture* puts it back, and *Reset to zero* clears it out for a real plan.
 
 ## Importing from a spreadsheet
 
@@ -111,6 +111,52 @@ accepted. A team that doesn't exist yet
 is flagged as a warning rather than an error — the summary might be for another
 instance — but the import will reject it until you add the team.
 
+## Exporting
+
+The same tab exports the plan as CSV: one row per initiative, four columns.
+
+```
+InitiativeName,Reference,StartMonth,EndMonth
+Project123,PRO-001,2026-09,2026-12
+ProjectABC,PRO-002,2026-10,2027-03
+```
+
+`EndMonth` is worked out from the demand profile — the start month plus however
+many months the initiative runs for. Rows come out in rank order, and archived
+initiatives are left out, because "set aside" is not one of the four columns and
+exporting them would present them as live work.
+
+**There are deliberately no team columns, and no FTE.** An import gives a team
+one figure for the whole span; a profile dialled in month by month cannot be
+written that way. Rather than flatten it and export a number you never entered,
+the FTE is left out entirely. What comes out is what identifies a piece of work
+and when it runs — which is what another tracker wants to be told.
+
+**It is not a backup.** Teams, supply, reserves, rank, owner, notes and archived
+state are not in those four columns. Feeding the file back into the import is
+refused, because it has no team columns — and that refusal is the safe answer,
+since an import replaces the demand of every row it matches.
+
+`GET /api/export.csv` returns the same file, for scripting it.
+
+## Undo
+
+**Ctrl+Z** steps back through the last fifty changes — drags, edits, deletions,
+imports, a reset. The header shows what the next press would take back and how
+far back it reaches.
+
+The stack lives on the server, as whole-plan snapshots rather than a log of
+inverse operations. A plan is a few hundred rows, so a snapshot costs nothing,
+and "put it back exactly" needs no inverse written for deleting a team — which
+cascades through its supply, reserves and demand — or for an import that touched
+forty initiatives at once. It also means a second tab, or a reloaded page, undoes
+the same history rather than keeping its own.
+
+Inside a text box, Ctrl+Z is left to the browser: taking it away to undo the plan
+instead would move something far from where you are looking and lose the
+half-typed number. Shift+Ctrl+Z is conventionally redo, which doesn't exist here,
+so it does nothing rather than quietly undoing again.
+
 ## What's on screen
 
 - **Portfolio** — the ranked list beside a monthly timeline. Drag a row to
@@ -124,12 +170,15 @@ instance — but the import will reject it until you add the team.
 - **Supply and reserves** — editable grids with a bulk fill, e.g. set SOC to
   2.00 FTE from one month to another. Leaving the FTE box empty clears those
   months, which means "no supply data", not zero.
-- **Import and convert** — CSV import, and a converter that turns a
-  `GRC: 1` style summary into the team columns an import needs.
+- **Import and convert** — CSV import, an export of the plan's initiatives,
+  and a converter that turns a `GRC: 1` style summary into the team columns an
+  import needs.
 - **Rules** — the allocation rules, what each colour means, and the behaviour
   that surprises people.
 - **Settings** — the horizon, a current-month override for experimenting, and
-  a reset to the demo fixture.
+  two ways to start again: reset to the demo fixture, or reset to zero for an
+  empty plan to build from scratch. Neither touches the horizon or the clock
+  override, and both are undoable.
 
 The month range in the header narrows all three data views at once. It only
 changes what you see: the plan is always worked out over the whole horizon, so
@@ -202,7 +251,7 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-51 tests in three suites:
+179 tests in four suites:
 
 - `tests/test_engine.py` — the specification's acceptance tests, T1 to T7,
   against the pure engine: baseline, drag-to-fit, fit hints, a displacement
@@ -211,6 +260,8 @@ pytest -q
   database.
 - `tests/test_security.py` — injection through every field the API accepts,
   path traversal, and input validation. See [SECURITY.md](SECURITY.md).
+- `tests/test_frontend.py` — static guards on `static/app.js`, pinning the
+  mistakes that have actually been made so they cannot be made again.
 
 ## Licence
 
