@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import io
 import os
+import re
 from datetime import date
 
 from contextlib import asynccontextmanager
@@ -74,7 +75,9 @@ def current_month(conn) -> str:
 
 
 def validate_month(month: str) -> str:
-    if not engine.MONTH_RE.match(month or ""):
+    # fullmatch, not match: `$` also matches before a final newline, so
+    # "2027-09\n" would pass and be stored with the newline in it.
+    if not engine.MONTH_RE.fullmatch(month or ""):
         raise ValueError(f"Not a month: {month!r}. Expected YYYY-MM.")
     return month
 
@@ -83,8 +86,56 @@ def validate_start_month(month: str, current_month: str) -> str:
     """R8: no starts in the past."""
     validate_month(month)
     if engine.month_index(month) < engine.month_index(current_month):
-        raise ValueError(f"Start month {month} is before the current month {current_month}.")
+        raise ValueError(
+            f"Start month {engine.month_name(month)} is before the current month "
+            f"{engine.month_name(current_month)}."
+        )
     return month
+
+
+def validate_end_month(start_month: str, end_month: str) -> int:
+    """The duration an end month gives, start inclusive.
+
+    Capped where the demand grid's offsets stop, so an initiative can never
+    run for months it has no way to ask for anyone in.
+    """
+    validate_month(end_month)
+    duration = engine.month_index(end_month) - engine.month_index(start_month) + 1
+    if duration < 1:
+        raise ValueError(
+            f"The end month, {engine.month_name(end_month)}, is before the start month, "
+            f"{engine.month_name(start_month)}."
+        )
+    if duration > MAX_OFFSET + 1:
+        raise ValueError(
+            f"{engine.month_name(start_month)} to {engine.month_name(end_month)} is "
+            f"{duration} months, more than the limit of {MAX_OFFSET + 1}."
+        )
+    return duration
+
+
+def validate_deadline_month(month: str | None) -> str | None:
+    """A deadline, or None. Blank means none, as null does, so the editor's
+    "No deadline" option can clear one."""
+    if not month:
+        return None
+    return validate_month(month)
+
+
+def validate_deadline(name: str, start_month: str, duration: int, deadline: str | None) -> None:
+    """R11: nothing ends after its deadline, whichever field would take it there.
+
+    Checked on the result rather than on the field that changed, because a
+    start moved on its own carries the end with it.
+    """
+    if deadline is None:
+        return
+    end = engine.month_add(start_month, duration - 1)
+    if engine.month_index(end) > engine.month_index(deadline):
+        raise ValueError(
+            f"That would end {name} in {engine.month_name(end)}, after its deadline of "
+            f"{engine.month_name(deadline)}."
+        )
 
 
 def validate_fte(fte_h: int) -> int:
@@ -140,10 +191,15 @@ def _initiative_name(conn, initiative_id: int) -> str:
 
 def _fill_label(what: str, conn, payload, months: list[str]) -> str:
     team = _team_name(conn, payload.team_id)
-    span = months[0] if len(months) == 1 else f"{months[0]} to {months[-1]}"
+    first, last = engine.month_name(months[0]), engine.month_name(months[-1])
+    span = first if len(months) == 1 else f"{first} to {last}"
     if payload.fte_h is None:
         return f"Cleared {what} for {team}, {span}."
     return f"Set {what} for {team} to {payload.fte_h / 100:.2f} FTE, {span}."
+
+
+def _end_of(row) -> str:
+    return engine.month_add(row["start_month"], row["duration_m"] - 1)
 
 
 def _patch_label(row, fields: dict) -> str:
@@ -151,15 +207,22 @@ def _patch_label(row, fields: dict) -> str:
 
     A drag sends only start_month; the editor's Save sends the lot, so the
     checks are ordered by which is worth reporting rather than by which
-    arrived.
+    arrived. The fields have been validated by the time this runs.
     """
+    name = row["name"]
     if "start_month" in fields and fields["start_month"] != row["start_month"]:
-        return f"Moved {row['name']} to {fields['start_month']}."
+        return f"Moved {name} to {engine.month_name(fields['start_month'])}."
+    if fields.get("end_month") is not None and fields["end_month"] != _end_of(row):
+        return f"Changed the end of {name} to {engine.month_name(fields['end_month'])}."
+    if "deadline_month" in fields and (fields["deadline_month"] or None) != row["deadline_month"]:
+        if fields["deadline_month"]:
+            return f"Set a deadline of {engine.month_name(fields['deadline_month'])} on {name}."
+        return f"Removed the deadline from {name}."
     if "archived" in fields and bool(fields["archived"]) != bool(row["archived"]):
-        return f"{'Archived' if fields['archived'] else 'Restored'} {row['name']}."
-    if "name" in fields and fields["name"].strip() != row["name"]:
-        return f"Renamed {row['name']} to {fields['name'].strip()}."
-    return f"Edited {row['name']}."
+        return f"{'Archived' if fields['archived'] else 'Restored'} {name}."
+    if "name" in fields and fields["name"].strip() != name:
+        return f"Renamed {name} to {fields['name'].strip()}."
+    return f"Edited {name}."
 
 
 def _reorder_label(conn, ordered_ids: list[int]) -> str:
@@ -210,11 +273,14 @@ def build_state(conn) -> dict:
                 ),
                 "status": outcome["status"],
                 "shortfalls": outcome["shortfalls"],
-                "length": max(
-                    (d["offset"] for d in demand_by_initiative.get(initiative["id"], [])),
-                    default=0,
-                )
-                + 1,
+                # Stored rather than read off the demand: an initiative can
+                # run for months in which it needs nobody.
+                "length": initiative["duration"],
+                "end_month": engine.month_add(
+                    initiative["start_month"], initiative["duration"] - 1
+                ),
+                "earliest_start": outcome["earliest_start"],
+                "end_limit": outcome["end_limit"],
             }
         )
 
@@ -389,6 +455,8 @@ def fill_reserve(reserve_id: int, payload: FillIn, conn=Depends(get_conn)):
 class InitiativeIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     start_month: str
+    end_month: str | None = None  # absent: the start month, so one month long
+    deadline_month: str | None = None  # absent, null or blank: no deadline
     owner: str = ""
     notes: str = ""
 
@@ -396,6 +464,8 @@ class InitiativeIn(BaseModel):
 class InitiativePatch(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     start_month: str | None = None
+    end_month: str | None = None
+    deadline_month: str | None = None  # null or blank clears it
     owner: str | None = None
     notes: str | None = None
     archived: bool | None = None
@@ -405,15 +475,23 @@ class InitiativePatch(BaseModel):
 def create_initiative(payload: InitiativeIn, conn=Depends(get_conn)):
     current = current_month(conn)
     guarded(validate_start_month, payload.start_month, current)
+    duration = 1
+    if payload.end_month is not None:
+        duration = guarded(validate_end_month, payload.start_month, payload.end_month)
+    deadline = guarded(validate_deadline_month, payload.deadline_month)
+    guarded(validate_deadline, payload.name.strip(), payload.start_month, duration, deadline)
+
     db.checkpoint(conn, f"Created {payload.name.strip()}.")
     stamp = db.now()
     conn.execute(
-        'INSERT INTO initiative (name, "rank", start_month, '
-        "owner, notes, archived, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
+        'INSERT INTO initiative (name, "rank", start_month, duration_m, deadline_month, '
+        "owner, notes, archived, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
         (
             payload.name.strip(),
             db.next_rank(conn),
             payload.start_month,
+            duration,
+            deadline,
             payload.owner.strip(),
             payload.notes.strip(),
             stamp,
@@ -427,7 +505,9 @@ def create_initiative(payload: InitiativeIn, conn=Depends(get_conn)):
 @app.patch("/api/initiatives/{initiative_id}")
 def update_initiative(initiative_id: int, payload: InitiativePatch, conn=Depends(get_conn)):
     row = conn.execute(
-        "SELECT name, start_month, archived FROM initiative WHERE id = ?", (initiative_id,)
+        "SELECT name, start_month, duration_m, deadline_month, archived "
+        "FROM initiative WHERE id = ?",
+        (initiative_id,),
     ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="No such initiative.")
@@ -439,18 +519,54 @@ def update_initiative(initiative_id: int, payload: InitiativePatch, conn=Depends
         # R8: a start cannot be moved into the past. Whether the initiative has
         # already started makes no difference — it can always be pushed out.
         guarded(validate_start_month, fields["start_month"], current)
+    start = fields.get("start_month", row["start_month"])
+
+    # The end is kept as a duration, so a start sent on its own — which is
+    # all a drag sends — carries the end along with it. An end sent with it
+    # is measured from the new start.
+    duration = row["duration_m"]
+    if fields.get("end_month") is not None:
+        duration = guarded(validate_end_month, start, fields["end_month"])
+
+    deadline = row["deadline_month"]
+    if "deadline_month" in fields:
+        deadline = guarded(validate_deadline_month, fields["deadline_month"])
+
+    # R11, on whatever combination arrived: a drag, a new end, or a deadline
+    # brought in past the end are all the same breach.
+    if fields.keys() & {"start_month", "end_month", "deadline_month"}:
+        name = (fields.get("name") or row["name"]).strip()
+        guarded(validate_deadline, name, start, duration, deadline)
 
     db.checkpoint(conn, _patch_label(row, fields))
 
-    editable = {"name", "start_month", "owner", "notes", "archived"}
+    editable = {"name", "start_month", "end_month", "deadline_month", "owner", "notes", "archived"}
     for key, value in fields.items():
         if key not in editable:
             bad(f"Cannot edit {key}.")
+        if key == "end_month":
+            continue  # stored as the duration, below
         if isinstance(value, str):
             value = value.strip()
         if key == "archived":
             value = int(bool(value))
+        if key == "deadline_month":
+            value = deadline  # "" is stored as NULL, which is what "none" is
         conn.execute(f"UPDATE initiative SET {key} = ? WHERE id = ?", (value, initiative_id))
+
+    if duration != row["duration_m"]:
+        conn.execute(
+            "UPDATE initiative SET duration_m = ? WHERE id = ?", (duration, initiative_id)
+        )
+        # Nothing may be asked for after the end. The editor only ever sends
+        # the months it shows, but an API client that shortens the end and
+        # never re-sends the grid would otherwise leave demand stranded in
+        # months the initiative no longer runs — still allocated, and
+        # invisible in the editor.
+        conn.execute(
+            "DELETE FROM demand WHERE initiative_id = ? AND offset_m >= ?",
+            (initiative_id, duration),
+        )
     conn.execute(
         "UPDATE initiative SET updated_at = ? WHERE id = ?", (db.now(), initiative_id)
     )
@@ -505,12 +621,27 @@ def replace_demand(
     `amend=1` says this is the second half of one user action — the editor
     saves a create-or-patch and then the grid — and folds it into the
     checkpoint that request already took, so one Save is one Ctrl+Z.
+
+    Every line must fall between the start and the end month. Demand past the
+    end is refused rather than trimmed: the end is set on its own, and a grid
+    that reaches past it means the two disagree about how long this runs.
     """
+    row = conn.execute(
+        "SELECT start_month, duration_m FROM initiative WHERE id = ?", (initiative_id,)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="No such initiative.")
+
     seen = set()
     for line in payload.lines:
         guarded(validate_fte, line.fte_h)
         if line.offset < 0 or line.offset > MAX_OFFSET:
             bad(f"Offset must be between 0 and {MAX_OFFSET}.")
+        if line.offset >= row["duration_m"]:
+            bad(
+                f"Demand runs past the end month, {engine.month_name(_end_of(row))}. "
+                "Move the end month first."
+            )
         if (line.team_id, line.offset) in seen:
             bad("Duplicate team and offset in the demand grid.")
         seen.add((line.team_id, line.offset))
@@ -575,18 +706,65 @@ class ImportIn(BaseModel):
     csv: str = Field(min_length=1, max_length=4_000_000)
 
 
+def _deadline_conflicts(conn, rows: list[dict]) -> list[str]:
+    """Rows that would carry an existing initiative past the deadline it has.
+
+    Only a file without a Deadline column can do this. One with the column
+    says what every deadline is, and the parser has already held each row's
+    end to it; one without leaves each deadline where it was, so the end the
+    file asks for has to respect the deadline already set (R11). The EndMonth
+    is given as the parser read it, YYYY-MM like the rest of the import's
+    messages, because that is the cell to find and edit; the deadline is the
+    plan's, not the file's, so it is named as every other month the app shows
+    is.
+    """
+    deadlines = {
+        r["reference"].lower(): r["deadline_month"]
+        for r in conn.execute(
+            "SELECT reference, deadline_month FROM initiative "
+            "WHERE reference IS NOT NULL AND reference != '' AND deadline_month IS NOT NULL"
+        )
+    }
+    errors = []
+    for row in rows:
+        deadline = deadlines.get(row["reference"].lower())
+        if "deadline_month" in row or deadline is None:
+            continue
+        end = engine.month_add(row["start_month"], row["months"] - 1)
+        if engine.month_index(end) > engine.month_index(deadline):
+            errors.append(
+                f"Line {row['line']}: EndMonth {end} is after the deadline already set on "
+                f"{row['reference']}, {engine.month_name(deadline)}. End it by then, or add a "
+                "Deadline column to move the deadline."
+            )
+    return errors
+
+
+def _line_of(message: str) -> int:
+    """The line an import message is about; 0 for one about the whole file."""
+    match = re.match(r"Line (\d+)\b", message)
+    return int(match.group(1)) if match else 0
+
+
 @app.post("/api/import")
 def import_csv(payload: ImportIn, conn=Depends(get_conn)):
     """Create or update initiatives from CSV, matching on Reference.
 
     All or nothing: the file is validated completely before anything is
-    written, and every problem is reported at once. Start months in the past
+    written, first on its own terms and then against the deadlines already in
+    the plan, and every problem is reported at once. Start months in the past
     are accepted here — unlike the editor — because an export of work already
     under way is the normal case, and R7 means only the remaining months are
     evaluated anyway.
     """
     data = db.load_engine_inputs(conn)
     rows, errors = importer.parse(payload.csv, data["teams"])
+    # The rows that parsed cleanly are checked against the plan even when
+    # others did not, so a file with both kinds of problem hears about both
+    # now rather than the second one on the next attempt. Sorted back into
+    # line order (stably, so one line's messages keep theirs), which is the
+    # order someone works down the file in.
+    errors = sorted(errors + _deadline_conflicts(conn, rows), key=_line_of)
     if errors:
         raise HTTPException(
             status_code=400,
@@ -619,16 +797,41 @@ def import_csv(payload: ImportIn, conn=Depends(get_conn)):
                 # Rank and archived are left alone: the file says what the work
                 # is, not where it sits in the plan or whether you set it aside.
                 conn.execute(
-                    "UPDATE initiative SET name = ?, start_month = ?, reference = ?, "
-                    "updated_at = ? WHERE id = ?",
-                    (row["name"], row["start_month"], row["reference"], stamp, initiative_id),
+                    "UPDATE initiative SET name = ?, start_month = ?, duration_m = ?, "
+                    "reference = ?, updated_at = ? WHERE id = ?",
+                    (
+                        row["name"],
+                        row["start_month"],
+                        row["months"],
+                        row["reference"],
+                        stamp,
+                        initiative_id,
+                    ),
                 )
+                # The deadline is the file's only when it has the column, and
+                # then a blank cell clears it, as a blank team cell clears
+                # that team's demand. Without the column it stays as it was.
+                if "deadline_month" in row:
+                    conn.execute(
+                        "UPDATE initiative SET deadline_month = ? WHERE id = ?",
+                        (row["deadline_month"], initiative_id),
+                    )
                 updated.append(row["name"])
             else:
                 initiative_id = conn.execute(
-                    'INSERT INTO initiative (name, "rank", start_month, reference, owner, '
-                    "notes, archived, created_at, updated_at) VALUES (?, ?, ?, ?, '', '', 0, ?, ?)",
-                    (row["name"], db.next_rank(conn), row["start_month"], row["reference"], stamp, stamp),
+                    'INSERT INTO initiative (name, "rank", start_month, duration_m, '
+                    "deadline_month, reference, owner, notes, archived, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, '', '', 0, ?, ?)",
+                    (
+                        row["name"],
+                        db.next_rank(conn),
+                        row["start_month"],
+                        row["months"],
+                        row.get("deadline_month"),
+                        row["reference"],
+                        stamp,
+                        stamp,
+                    ),
                 ).lastrowid
                 existing[ref_key] = initiative_id
                 created.append(row["name"])
@@ -708,7 +911,7 @@ def undo(conn=Depends(get_conn)):
 
 # --- export ------------------------------------------------------------------
 
-EXPORT_COLUMNS = ["InitiativeName", "Reference", "StartMonth", "EndMonth"]
+EXPORT_COLUMNS = ["InitiativeName", "Reference", "StartMonth", "EndMonth", "Deadline"]
 
 # A cell opened in a spreadsheet and starting with one of these is a formula,
 # not text, so a name is prefixed with an apostrophe before it can become one.
@@ -722,34 +925,29 @@ def csv_safe(value: str) -> str:
 
 
 def export_rows(conn) -> list[list[str]]:
-    """Every live initiative as name, reference, start and end.
+    """Every live initiative as name, reference, start, end and deadline.
 
-    Four columns and no more. The import's team columns carry one FTE for the
+    Five columns and no more. The import's team columns carry one FTE for the
     whole span, and a profile dialled in month by month cannot be written that
     way without quietly flattening it — so the FTE is not exported at all
     rather than exported wrong. What comes out is what identifies a piece of
-    work and when it runs, which is what another tracker wants to be told.
+    work, when it runs and when it must be done by, which is what another
+    tracker wants to be told. The deadline is blank where there is none.
 
-    Archived initiatives are left out: "set aside" is not one of these four
+    Archived initiatives are left out: "set aside" is not one of these five
     columns, so exporting them would present them as live work.
     """
     initiatives = conn.execute(
-        'SELECT id, name, reference, start_month FROM initiative '
+        "SELECT name, reference, start_month, duration_m, deadline_month FROM initiative "
         'WHERE archived = 0 ORDER BY "rank"'
     ).fetchall()
-    # An initiative with no demand at all still occupies its start month.
-    lengths = {
-        r["initiative_id"]: r["last"] + 1
-        for r in conn.execute(
-            "SELECT initiative_id, MAX(offset_m) AS last FROM demand GROUP BY initiative_id"
-        )
-    }
     return [
         [
             csv_safe(row["name"]),
             csv_safe(row["reference"] or ""),
             row["start_month"],
-            engine.month_add(row["start_month"], lengths.get(row["id"], 1) - 1),
+            engine.month_add(row["start_month"], row["duration_m"] - 1),
+            row["deadline_month"] or "",
         ]
         for row in initiatives
     ]

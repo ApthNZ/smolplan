@@ -6,6 +6,7 @@ let state = null;
 let view = "portfolio";
 let showArchived = false;
 let teamFilter = null; // team id, or null for every team
+let search = ""; // text to find in an initiative's name or reference; "" shows all
 let importResult = null; // summary of the last successful import
 let monthFrom = null; // narrowed display window; null means the whole horizon
 let monthTo = null;
@@ -77,6 +78,18 @@ function monthLong(m) {
   const [year, mo] = m.split("-");
   return `${MONTHS[Number(mo) - 1]} ${year}`;
 }
+
+// A dropdown of months reads as names, but its values stay YYYY-MM, because
+// that is what the API takes.
+function monthOptions(list, chosen) {
+  return list.map((m) =>
+    el("option", m === chosen ? { value: m, selected: true } : { value: m }, monthLong(m))
+  );
+}
+
+// The longest an initiative can run: offsets 0..119, which is as far as the
+// server will store demand.
+const MAX_MONTHS = 120;
 
 // `kind` defaults to an error, because that is what every existing caller is
 // reporting. Confirmations pass "note" so that a message saying a thing worked
@@ -245,6 +258,56 @@ const initiativeTeams = (initiative) => initiative.demand.map((d) => d.team_id);
 const reserveTeams = (reserve) => Object.keys(reserve.lines).map(Number);
 const drawsOnFilteredTeam = (teamIds) => teamFilter === null || teamIds.includes(teamFilter);
 
+// The reference is searched as well as the name, because an issue key is often
+// the thing someone has in hand when they come looking.
+const searchText = () => search.trim().toLowerCase();
+const matchesSearch = (initiative) =>
+  !searchText() ||
+  [initiative.name, initiative.reference].some((text) =>
+    (text || "").toLowerCase().includes(searchText())
+  );
+
+// render() rebuilds the whole view, so the box being typed into is replaced on
+// every keystroke. The focus and the caret are put back on its successor, or
+// the second letter typed would go nowhere.
+function setSearch(value, caret) {
+  search = value;
+  render();
+  const box = $("#view input.search");
+  if (!box) return;
+  box.focus();
+  box.setSelectionRange(caret.start, caret.end, caret.direction || "none");
+}
+
+function searchBox() {
+  const update = (e) =>
+    setSearch(e.target.value, {
+      start: e.target.selectionStart,
+      end: e.target.selectionEnd,
+      direction: e.target.selectionDirection,
+    });
+  return el("input", {
+    type: "search",
+    class: "search",
+    placeholder: "Find an initiative",
+    title: "Show only initiatives whose name or reference contains this",
+    "aria-label": "Find an initiative by name or reference",
+    value: search,
+    // Rebuilding the box mid-composition would throw away a half-entered
+    // character from an input method, so wait for it to be committed.
+    oninput: (e) => !e.isComposing && update(e),
+    oncompositionend: update,
+    onkeydown: (e) => {
+      // Escape empties the box first and closes the drawer only once it is
+      // empty, so one press does one thing and neither is out of reach.
+      if (e.key !== "Escape" || !e.target.value) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setSearch("", { start: 0, end: 0 });
+    },
+  });
+}
+
 // --- the width of the initiative column --------------------------------------
 
 // A long name and a row of team tags compete for the same space, and which one
@@ -346,8 +409,13 @@ function renderPortfolio() {
   const months = visibleMonths();
   const width = months.length * COL;
   const visible = state.initiatives.filter(
-    (i) => (showArchived || !i.archived) && drawsOnFilteredTeam(initiativeTeams(i))
+    (i) =>
+      (showArchived || !i.archived) &&
+      drawsOnFilteredTeam(initiativeTeams(i)) &&
+      matchesSearch(i)
   );
+  // The search finds initiatives. Reserves and the capacity rows belong to
+  // teams, not to any one initiative, so they stay whatever it says.
   const reserves = state.reserves.filter((r) => drawsOnFilteredTeam(reserveTeams(r)));
 
   const side = el("div", { class: "side" }, el("div", { class: "head" }, "Rank and initiative"));
@@ -496,6 +564,17 @@ function renderPortfolio() {
     track.append(timelineRow(initiative, months));
   }
 
+  if (searchText() && !visible.length) {
+    side.append(
+      el(
+        "div",
+        { class: "side-row" },
+        el("span", { class: "muted" }, `No initiative matches “${search.trim()}”.`)
+      )
+    );
+    track.append(el("div", { class: "tl-row" }));
+  }
+
   capacityRow(
     "Supply after initiatives",
     "What is still unspent once the green initiatives above have taken their "
@@ -508,7 +587,10 @@ function renderPortfolio() {
     true
   );
 
-  if (!visible.length && !reserves.length) {
+  // Only with a team filter on: without one, an empty plan would be told that
+  // nothing draws on "Team null". With a search on, the row above already says
+  // why the list is empty, and this would blame the team instead.
+  if (teamFilter !== null && !searchText() && !visible.length && !reserves.length) {
     side.append(
       el(
         "div",
@@ -534,6 +616,7 @@ function renderPortfolio() {
       "div",
       { class: "toolbar" },
       el("button", { class: "primary", onclick: () => openEditor(null) }, "New initiative"),
+      searchBox(),
       el(
         "label",
         { style: "display:flex;gap:5px;align-items:center;margin:0" },
@@ -584,9 +667,31 @@ function renderPortfolio() {
       { class: "legend" },
       el("span", {}, "● Green: fully staffed"),
       el("span", {}, "▲ Red: cannot be staffed, consumes nothing"),
-      el("span", {}, "Grey: in the past or archived")
+      el("span", {}, "Grey: in the past or archived"),
+      el("span", {}, edgeKey("glow-start"), "Blue start edge: could start earlier"),
+      el("span", {}, edgeKey("glow-capacity"), "Yellow end edge: a month later would be short"),
+      el("span", {}, edgeKey("glow-deadline"), "Red end edge: on its deadline, cannot move later"),
+      el("span", {}, el("i", { class: "tick-key" }), "Red line: the deadline")
     )
   );
+}
+
+// A small green bar wearing one glow, for the legends.
+const edgeKey = (glow) => el("i", { class: `edge-key ${glow}` });
+
+// The glows say these in colour. This says them in words — in the bar's tooltip
+// and in the panel a click on it opens — so colour is never the only signal.
+function edgeNotes(initiative) {
+  const notes = [];
+  if (initiative.earliest_start) {
+    notes.push(`Could start as early as ${monthLong(initiative.earliest_start)}`);
+  }
+  if (initiative.end_limit === "deadline") {
+    notes.push(`Ends on its deadline, ${monthLong(initiative.deadline_month)} — cannot move later`);
+  } else if (initiative.end_limit === "capacity") {
+    notes.push("Cannot slip: a month later would be short");
+  }
+  return notes;
 }
 
 function sideRow(initiative) {
@@ -636,14 +741,21 @@ function sideRow(initiative) {
   return row;
 }
 
-// Red bars say which teams are short; there is nothing as useful to say about a
-// green one, so it keeps the drag hint.
+// "Sep 2026 to Feb 2027", or just "Sep 2026" for a single month.
+const monthSpan = (start, end) =>
+  start === end ? monthLong(start) : `${monthLong(start)} to ${monthLong(end)}`;
+
+// The first line answers what a bar is hovered for. A red bar's is which teams
+// are short. Any other bar's is where it sits in time, because on a long list
+// the month header is a long way up to trace. The glows follow in words, one
+// to a line.
 function barTitle(initiative, locked) {
   if (locked) return `${initiative.name} — archived`;
   const teams = initiative.status === "red" ? shortfallTeams(initiative) : [];
-  return teams.length
-    ? `${initiative.name} — shortfalls in: ${teams.join(", ")}`
-    : `${initiative.name} — drag to move the start`;
+  const lead = teams.length
+    ? `shortfalls in: ${teams.join(", ")}`
+    : monthSpan(initiative.start_month, initiative.end_month);
+  return [`${initiative.name} — ${lead}`, ...edgeNotes(initiative)].join("\n");
 }
 
 function timelineRow(initiative, months) {
@@ -660,22 +772,67 @@ function timelineRow(initiative, months) {
   const left = Math.max(0, offset) * COL;
   const cells = Math.min(span + Math.min(0, offset), months.length - Math.max(0, offset));
 
+  // At the end of the deadline month, in this row only. Appended before the bar
+  // so that where the two meet the bar is on top, and a drag that starts there
+  // still takes hold of the bar.
+  const deadline = initiative.deadline_month;
+  const tick =
+    deadline && months.includes(deadline) && !initiative.archived && initiative.status !== "past"
+      ? el("div", {
+          class: "deadline-tick",
+          style: `left:${(months.indexOf(deadline) + 1) * COL}px`,
+          title: `Deadline: ${monthLong(deadline)}`,
+        })
+      : null;
+  if (tick) row.append(tick);
+
+  // No month of the bar is on screen. Work that has finished lands here, but
+  // so does work before or after a narrowed month window, and a live
+  // initiative drawn as grey "ended" would hide its colour — red included —
+  // behind something untrue. So the chip keeps the status, sits on the side
+  // the bar is off to, and says which side that is.
   if (cells <= 0) {
+    const later = offset >= months.length;
+    const wide = Math.min(2, months.length) * COL;
+    const ended = initiative.status === "past";
     row.append(
       el(
         "div",
-        { class: "bar past", style: `left:0;width:${COL * 2}px`, title: "Ended before the current month" },
-        "ended"
+        {
+          class: `bar ${initiative.status}`,
+          style: `left:${later ? months.length * COL - wide : 0}px;width:${wide - 4}px`,
+          // barTitle, so a red chip still names what is holding it and the
+          // glow sentences survive; only the side it is off to is added.
+          title: ended
+            ? "Ended before the current month"
+            : `${barTitle(initiative, initiative.archived)}\n`
+              + `${later ? "After" : "Before"} the months shown`,
+        },
+        initiative.status === "red" ? el("span", { class: "icon" }, "▲") : null,
+        ended ? "ended" : later ? "later" : "earlier"
       )
     );
+    // Nothing drags from a chip, so the tick can go back on top of it rather
+    // than vanish under one sitting in the first or last two columns.
+    if (tick) row.append(tick);
     return row;
   }
 
   const locked = initiative.archived;
+  // An edge outside the month window is not on screen, so a glow there would be
+  // lighting up the edge of the window instead, and saying something untrue
+  // about where the bar starts or ends.
+  const startShown = offset >= 0;
+  const endShown = offset + span <= months.length;
+  const glows = [
+    startShown && initiative.earliest_start ? "glow-start" : "",
+    endShown && initiative.end_limit === "deadline" ? "glow-deadline" : "",
+    endShown && initiative.end_limit === "capacity" ? "glow-capacity" : "",
+  ].join(" ");
   const bar = el(
     "div",
     {
-      class: `bar ${initiative.status} ${locked ? "locked" : ""}`,
+      class: `bar ${initiative.status} ${locked ? "locked" : ""} ${glows}`,
       style: `left:${left}px;width:${cells * COL - 4}px`,
       title: barTitle(initiative, locked),
     },
@@ -694,12 +851,24 @@ function startBarDrag(event, initiative, bar, grid, months, locked) {
   // A start behind the current month is drawn clipped at column zero, so the
   // drag is measured from where the bar actually sits.
   const origin = Math.max(0, mIndex(initiative.start_month) - mIndex(months[0]));
+  // R11: the end may never pass the deadline, so the drag stops at the last
+  // start that still ends in time, and a bar already on its deadline cannot go
+  // later at all. The server refuses it anyway; this keeps the bar from
+  // following the pointer to a drop that would only bounce.
+  const latest = initiative.deadline_month
+    ? mIndex(initiative.deadline_month) - (initiative.length - 1) - mIndex(months[0])
+    : Infinity;
   let target = origin;
   let moved = false;
+  // A plain click lets go before the hints arrive. Painting them after that
+  // would leave shading on the row, with nothing being dragged, until the next
+  // render.
+  let released = false;
 
   if (!locked) {
     api("GET", `/api/initiatives/${initiative.id}/fit`)
       .then(({ hints }) => {
+        if (released) return;
         const set = new Set(hints);
         [...grid.children].forEach((cell, index) => {
           cell.classList.toggle("hint", set.has(months[index]));
@@ -714,17 +883,20 @@ function startBarDrag(event, initiative, bar, grid, months, locked) {
     if (delta === 0 && !moved) return;
     moved = true;
     bar.classList.add("dragging");
-    target = Math.min(Math.max(origin + delta, 0), months.length - 1);
+    target = Math.max(0, Math.min(origin + delta, months.length - 1, latest));
     bar.style.left = `${target * COL}px`;
   };
 
   const onUp = () => {
+    released = true;
     bar.releasePointerCapture(event.pointerId);
     bar.removeEventListener("pointermove", onMove);
     bar.removeEventListener("pointerup", onUp);
     bar.classList.remove("dragging");
 
-    if (!moved || months[target] === initiative.start_month) {
+    // target > latest only when even the first month on screen is too late: a
+    // bar clipped at column zero whose deadline leaves it nowhere to go.
+    if (!moved || months[target] === initiative.start_month || target > latest) {
       bar.style.left = `${origin * COL}px`;
       [...grid.children].forEach((cell) => cell.classList.remove("hint"));
       openShortfalls(initiative);
@@ -769,7 +941,7 @@ function openShortfalls(initiative) {
     return el(
       "li",
       {},
-      `${teamName(s.team_id)} ${s.month}: short ${fte(s.short)} `,
+      `${teamName(s.team_id)} ${monthLong(s.month)}: short ${fte(s.short)} `,
       el("span", { class: "muted" }, s.reason === "no_supply_data" ? "(no supply data)" : ""),
       cause ? el("div", { class: "cause muted" }, cause) : null
     );
@@ -784,11 +956,18 @@ function openShortfalls(initiative) {
       el("dt", {}, "Rank"),
       el("dd", {}, initiative.rank),
       el("dt", {}, "Start"),
-      el("dd", {}, initiative.start_month),
+      el("dd", {}, monthLong(initiative.start_month)),
+      el("dt", {}, "End"),
+      el("dd", {}, monthLong(initiative.end_month)),
+      el("dt", {}, "Deadline"),
+      initiative.deadline_month
+        ? el("dd", {}, monthLong(initiative.deadline_month))
+        : el("dd", { class: "muted" }, "None"),
       ...(initiative.reference
         ? [el("dt", {}, "Reference"), el("dd", {}, initiative.reference)]
         : [])
     ),
+    edgeNotes(initiative).map((note) => el("p", {}, `${note}.`)),
     rows.length ? el("h3", {}, "Shortfalls") : null,
     rows.length ? el("ul", {}, rows) : el("p", { class: "muted" }, "No shortfalls."),
     el("button", { onclick: () => openEditor(initiative) }, "Edit initiative")
@@ -805,34 +984,78 @@ function openEditor(initiative) {
     owner: "",
     notes: "",
     start_month: months[0],
+    end_month: months[0],
+    deadline_month: null,
     demand: [],
     length: 1,
     archived: false,
   };
 
-  let columns = Math.min(24, Math.max(6, data.length + 2));
+  // The dates as the server keeps them: a start, a length and an optional
+  // deadline. The length is the column count, one per month from start to end,
+  // so moving the start carries the end with it just as it carries the demand.
+  // `wanted` is the length asked for, which only the End list changes, and
+  // `columns` is what the deadline leaves of it. Kept apart so that a start or
+  // a deadline moved and then moved back puts the end back where it was,
+  // rather than saving an initiative shorter than anyone chose.
+  let start = data.start_month;
+  let wanted = data.length;
+  let columns = data.length;
+  let deadline = data.deadline_month || null;
+  let clamped = 0; // months the deadline is cutting off the length asked for
+  const end = () => monthAdd(start, columns - 1);
   const grid = new Map(data.demand.map((d) => [`${d.team_id}|${d.offset}`, d.fte_h]));
 
   const nameInput = el("input", { value: data.name, placeholder: "Initiative name" });
   const ownerInput = el("input", { value: data.owner || "" });
   const notesInput = el("input", { value: data.notes || "" });
-  const startSelect = el(
-    "select",
-    {},
-    months.map((m) => el("option", m === data.start_month ? { value: m, selected: true } : { value: m }, m))
-  );
-  // A start behind the current month is outside the display range. Keep it as
-  // an option so saving the other fields does not silently move it forward.
-  if (!months.includes(data.start_month)) {
-    startSelect.prepend(el("option", { value: data.start_month, selected: true }, data.start_month));
+  const startSelect = el("select", {});
+  const endSelect = el("select", {});
+  const deadlineSelect = el("select", {
+    title: "A hard limit (R11): nothing about this initiative may end after it",
+  });
+
+  // Each list depends on the other two, so all three are rebuilt on any change
+  // of date, and none of them offers a month the server would refuse.
+  function drawMonthSelects() {
+    const byDeadline = (m) => !deadline || mIndex(m) <= mIndex(deadline);
+    // A start behind the current month is outside the display range. Keep it as
+    // an option so saving the other fields does not silently move it forward.
+    const starts = months.includes(data.start_month) ? months : [data.start_month, ...months];
+    setChildren(startSelect, monthOptions(starts.filter(byDeadline), start));
+
+    const ahead = Array.from({ length: MAX_MONTHS }, (_, n) => monthAdd(start, n));
+    setChildren(endSelect, monthOptions(ahead.filter(byDeadline), end()));
+
+    // A deadline further out than the list reaches can only have come from an
+    // import. Kept for the same reason as the start above.
+    const deadlines = deadline && !ahead.includes(deadline) ? [...ahead, deadline] : ahead;
+    setChildren(
+      deadlineSelect,
+      el("option", deadline ? { value: "" } : { value: "", selected: true }, "No deadline"),
+      monthOptions(deadlines, deadline)
+    );
+  }
+
+  // Moving the start keeps the length, as a drag does, and moving the deadline
+  // in keeps the end where it was, but neither may carry the end past the
+  // deadline (R11). Where one would, the end stops at the deadline and the grid
+  // loses columns, which the note under it owns up to. Worked out afresh from
+  // the length asked for each time, so the note counts the whole cut however
+  // many steps it took, and the columns come back once the deadline allows.
+  // At least one column is always left: no start on offer is after the deadline.
+  function clampToDeadline() {
+    columns = deadline ? Math.min(wanted, mIndex(deadline) - mIndex(start) + 1) : wanted;
+    clamped = wanted - columns;
   }
 
   const gridBox = el("div", { class: "scroll-x" });
+  const note = el("p", { class: "muted", style: "margin:6px 0 0", hidden: true });
 
   // Demand is stored as an offset from the start month, so that moving the
   // start moves the whole profile. The grid shows the months those offsets
   // currently land on, because "+3" means nothing to a reader.
-  const columnMonth = (offset) => monthAdd(startSelect.value, offset);
+  const columnMonth = (offset) => monthAdd(start, offset);
 
   function drawGrid() {
     const head = el(
@@ -874,18 +1097,48 @@ function openEditor(initiative) {
     );
     setChildren(gridBox, el("table", {}, el("thead", {}, head), el("tbody", {}, body)));
   }
-  drawGrid();
+
+  // Demand in columns that have been cut off is still held, so that moving the
+  // end out again brings it back, but Save will not send it. Saying so is the
+  // difference between a shorter grid and demand that vanishes on Save.
+  //
+  // The End list stops at the deadline, so with the end on the deadline "move
+  // the end month out" is advice the form will not let anyone take. A cut the
+  // deadline made undoes itself once the deadline moves, since the length
+  // asked for is remembered; an end shortened by hand needs moving as well.
+  function drawNote() {
+    const beyond = [...grid.keys()].some((key) => Number(key.split("|")[1]) >= columns);
+    const plural = clamped === 1 ? "" : "s";
+    const onDeadline = deadline && mIndex(end()) >= mIndex(deadline);
+    const advice = clamped
+      ? "move the deadline out to keep it"
+      : onDeadline
+        ? "move the deadline out, then the end month, to keep it"
+        : "move the end month out again to keep it";
+    setChildren(
+      note,
+      clamped
+        ? `The deadline cut ${clamped} month${plural} off the end, which is now ${monthLong(end())}. `
+        : null,
+      beyond
+        ? `Demand entered after ${monthLong(end())} will not be saved \u2014 ${advice}.`
+        : null
+    );
+    note.hidden = !clamped && !beyond;
+  }
 
   const fillTeam = el("select", {}, state.teams.map((t) => el("option", { value: t.id }, t.name)));
   const fillFrom = el("select", {});
   const fillTo = el("select", {});
   const fillValue = el("input", { type: "number", step: "0.05", min: "0", value: "0.50", style: "width:62px" });
 
-  // Rebuilt whenever the start month or the column count changes, so the
-  // dropdowns always name the months actually on screen.
+  // Rebuilt whenever the start or the end changes, so the dropdowns always name
+  // the months actually on screen. A "to" on the last column stays on the last
+  // column, so that it goes on meaning "through to the end".
   function drawFillRange() {
     const from = Number(fillFrom.value || 0);
-    const to = fillTo.value === "" ? columns - 1 : Number(fillTo.value);
+    const toEnd = fillTo.value === "" || Number(fillTo.value) === fillTo.options.length - 1;
+    const to = toEnd ? columns - 1 : Number(fillTo.value);
     const options = (offset) =>
       Array.from({ length: columns }, (_, o) =>
         el("option", o === offset ? { value: o, selected: true } : { value: o }, monthLong(columnMonth(o)))
@@ -893,24 +1146,49 @@ function openEditor(initiative) {
     setChildren(fillFrom, ...options(Math.min(from, columns - 1)));
     setChildren(fillTo, ...options(Math.min(to, columns - 1)));
   }
-  drawFillRange();
 
-  startSelect.addEventListener("change", () => {
+  function redraw() {
+    drawMonthSelects();
     drawGrid();
     drawFillRange();
+    drawNote();
+  }
+  redraw();
+
+  startSelect.addEventListener("change", () => {
+    start = startSelect.value;
+    clampToDeadline();
+    redraw();
+  });
+  endSelect.addEventListener("change", () => {
+    // A new length asked for, and one the list has already held to the deadline.
+    wanted = columns = mIndex(endSelect.value) - mIndex(start) + 1;
+    clamped = 0;
+    redraw();
+  });
+  deadlineSelect.addEventListener("change", () => {
+    deadline = deadlineSelect.value || null;
+    clampToDeadline();
+    redraw();
   });
 
   async function save() {
-    const lines = [...grid.entries()].map(([key, value]) => {
-      const [teamId, offset] = key.split("|").map(Number);
-      return { team_id: teamId, offset, fte_h: value };
-    });
+    // Values in columns an earlier end cut off are still in `grid`, so only the
+    // columns on screen are sent. The server refuses demand past the end anyway;
+    // this keeps a shortened grid from turning into a failed Save.
+    const lines = [...grid.entries()]
+      .map(([key, value]) => {
+        const [teamId, offset] = key.split("|").map(Number);
+        return { team_id: teamId, offset, fte_h: value };
+      })
+      .filter((line) => line.offset < columns);
+    const dates = { start_month: start, end_month: end(), deadline_month: deadline };
     try {
       let id = initiative && initiative.id;
       if (isNew) {
         const created = await api("POST", "/api/initiatives", {
           name: nameInput.value.trim() || "Untitled",
-          start_month: startSelect.value,
+          ...dates,
           owner: ownerInput.value,
           notes: notesInput.value,
         });
@@ -921,8 +1199,8 @@ function openEditor(initiative) {
           name: nameInput.value.trim() || data.name,
           owner: ownerInput.value,
           notes: notesInput.value,
+          ...dates,
         };
-        patch.start_month = startSelect.value;
         setState(await api("PATCH", `/api/initiatives/${id}`, patch));
       }
       // amend=1: this is the second half of one Save, so it folds into the
@@ -941,6 +1219,8 @@ function openEditor(initiative) {
     field("Name", nameInput),
     field("Owner", ownerInput),
     field("Start month", startSelect),
+    field("End month", endSelect),
+    field("Deadline", deadlineSelect),
     data.reference
       ? field(
           "Reference (set by import)",
@@ -952,9 +1232,11 @@ function openEditor(initiative) {
     el(
       "p",
       { class: "muted", style: "margin:0 0 6px" },
-      "Months follow the start month. Move the initiative and the whole profile moves with it."
+      "One column per month from the start month to the end month. Move the start "
+        + "and the whole profile moves with it, end included."
     ),
     gridBox,
+    note,
     el(
       "div",
       { style: "margin-top:8px" },
@@ -975,32 +1257,21 @@ function openEditor(initiative) {
         el("span", { class: "muted" }, "to"),
         fillTo,
         el(
-        "button",
-        {
-          onclick: () => {
-            const value = parseFte(fillValue.value);
-            const from = Number(fillFrom.value);
-            const to = Number(fillTo.value);
-            for (let offset = from; offset <= to && offset < columns; offset++) {
-              const key = `${fillTeam.value}|${offset}`;
-              if (!value) grid.delete(key);
-              else grid.set(key, value);
-            }
-            drawGrid();
-          },
-        },
-          "Apply"
-        ),
-        el(
           "button",
           {
             onclick: () => {
-              columns = Math.min(24, columns + 3);
+              const value = parseFte(fillValue.value);
+              const from = Number(fillFrom.value);
+              const to = Number(fillTo.value);
+              for (let offset = from; offset <= to && offset < columns; offset++) {
+                const key = `${fillTeam.value}|${offset}`;
+                if (!value) grid.delete(key);
+                else grid.set(key, value);
+              }
               drawGrid();
-              drawFillRange();
             },
           },
-          "+3 months"
+          "Apply"
         )
       )
     ),
@@ -1100,7 +1371,7 @@ function renderHeatmap() {
             // The numbers stay in the cell, so colour is a second reading of
             // the same fact rather than the only one.
             style: cell.has_supply_row ? `--u:${utilisationHue(over ? 1 : pct / 100)}` : "",
-            title: `${team.name} ${month} — ${
+            title: `${team.name}, ${monthLong(month)} — ${
               !cell.has_supply_row
                 ? "no supply data"
                 : over
@@ -1136,7 +1407,7 @@ function openCell(team, month) {
     el("li", {}, `${c.name} — ${fte(c.fte_h)} `, el("span", { class: "muted" }, c.kind))
   );
   drawer(
-    el("h2", {}, `${team.name}, ${month}`),
+    el("h2", {}, `${team.name}, ${monthLong(month)}`),
     el(
       "dl",
       {},
@@ -1342,7 +1613,7 @@ function monthGrid(read, write) {
             step: "0.05",
             min: "0",
             value: current == null ? "" : fte(current),
-            title: `${team.name} ${month}`,
+            title: `${team.name}, ${monthLong(month)}`,
             onchange: (e) =>
               write(team, month, e.target.value.trim() === "" ? null : parseFte(e.target.value)),
           })
@@ -1519,6 +1790,10 @@ function importPanel() {
         // so it can be corrected rather than re-pasted.
         const detail = data && data.detail;
         const problems = (detail && detail.errors) || [String((detail && detail.message) || "Import failed.")];
+        // The last import's green summary sits just above this. Left there, it
+        // reads as though this one half-worked, when nothing was written.
+        importResult = null;
+        summary.forEach((node) => node && node.remove());
         setChildren(result, 
           el("p", { class: "status-red" }, (detail && detail.message) || "Import failed."),
           el("ul", { class: "import-errors" }, problems.map((p) => el("li", {}, p)))
@@ -1566,6 +1841,7 @@ function importPanel() {
       el("li", {}, "One column per team, headed with the team name. The value is that team's FTE for every month from StartMonth to EndMonth inclusive."),
       el("li", {}, "A blank team cell means that team is not needed. Column order and capitalisation do not matter."),
       el("li", {}, "StartMonth and EndMonth are YYYY-MM, but a full date is accepted too \u2014 1/07/2026 0:00 is read as 2026-07. Slashed dates are read day-first."),
+      el("li", {}, "An optional Deadline column, in the same format, sets each row\u2019s deadline \u2014 so no team can be called Deadline. A blank cell means no deadline, and clears one already set. Leave the column out and the deadlines already in the plan are kept. Either way, an EndMonth after the deadline is refused (R11)."),
       el("li", {}, "A start in the past is accepted — only the remaining months are evaluated."),
       el("li", {}, "New rows are added below everything already in the plan. Nothing is ever deleted or re-ranked."),
       el("li", {}, "If anything is wrong, the whole file is rejected and you get every problem at once.")),
@@ -1620,10 +1896,10 @@ function exportPanel() {
     "div",
     {},
     el("p", { class: "muted" },
-      "Every initiative in the plan as four columns \u2014 name, reference, start "
-      + "month and end month \u2014 for pushing back into an issue tracker. The end "
-      + "month is worked out from the demand profile: the start month plus however "
-      + "many months it runs for."),
+      "Every initiative in the plan as five columns \u2014 name, reference, start "
+      + "month, end month and deadline \u2014 for pushing back into an issue tracker. "
+      + "The end month is the one set on the initiative, and the deadline is blank "
+      + "where there is none."),
     el("ul", { class: "import-notes muted" },
       el("li", {},
         el("b", {}, "No team columns, and no FTE. "),
@@ -1633,11 +1909,11 @@ function exportPanel() {
       el("li", {},
         el("b", {}, "This is not a backup. "),
         "Teams, supply, reserves, rank, owner, notes and archived state are not in "
-        + "these four columns. Feeding this file back into the import above is "
+        + "these five columns. Feeding this file back into the import above is "
         + "refused \u2014 it has no team columns \u2014 which is the safe answer, because "
         + "an import replaces the demand of every row it matches."),
       el("li", {}, "Archived initiatives are left out: \u201cset aside\u201d is not one of "
-        + "the four columns, so exporting them would present them as live work."),
+        + "the five columns, so exporting them would present them as live work."),
       el("li", {}, "Rows come out in rank order.")),
     el("div", { class: "row", style: "margin:10px 0" },
       el("a",
@@ -1701,12 +1977,12 @@ function renderSettings() {
     el(
       "div",
       { class: "field" },
-      el("label", {}, "Current month override (blank uses the real clock)"),
+      el("label", {}, "Current month override, as YYYY-MM (blank uses the real clock)"),
       el(
         "div",
         { class: "row" },
         clock,
-        el("span", { class: "muted" }, `today is ${state.settings.today_month}`)
+        el("span", { class: "muted" }, `today is ${monthLong(state.settings.today_month)}`)
       )
     ),
     el(
@@ -1785,13 +2061,15 @@ const RULES = [
   ["R6", "There is no pausing. Work that stops is split.",
    "Shorten the initiative to the last month delivered and create a new one for the remainder. A gap in the middle would hide the fact that it stopped."],
   ["R7", "Only the current and future months are evaluated.",
-   "The past is settled. An initiative lying entirely behind the current month can never turn red."],
+   "The past is settled. An initiative lying entirely behind the current month can never turn red. Entirely means its end month too: one whose demand has stopped but whose end is still ahead is still running."],
   ["R8", "A start cannot be moved into the past.",
    "Anything can be pushed out, including work that has already begun. Nothing can be dragged behind the clock."],
   ["R9", "A month with no supply figure counts as zero, but is labelled differently.",
    "\u201cNo supply data\u201d means nobody has said what that team has. That is not the same as saying they have none, and a shortfall tells you which it is."],
   ["R10", "Reserves may exceed supply.",
    "The cell is flagged and available capacity clamps to zero. Negative capacity is not a thing."],
+  ["R11", "A deadline is a hard limit.",
+   "Nothing may end after it. The editor will not offer a later end, a drag stops at it, and an import that would carry an initiative past it is refused. A bar that ends on its deadline glows red at its end, because it cannot slip at all, however much capacity there is."],
 ];
 
 const SURPRISES = [
@@ -1800,9 +2078,11 @@ const SURPRISES = [
   ["Re-ranking can turn green work red.",
    "That is the point. The cost of a new priority is made visible rather than absorbed silently."],
   ["Demand travels with the start month.",
-   "The demand grid is relative to the start, so moving an initiative moves its whole profile with it."],
+   "The demand grid is relative to the start, and an initiative keeps its length when it moves, so moving it carries its whole profile, and its end month, with it."],
   ["The months that shade while you drag ignore lower-ranked work.",
    "They show where this initiative would be green given everything ranked above it. What it would displace below only appears once you drop it."],
+  ["So does a blue start edge.",
+   "It says the initiative would still be green starting earlier, by the same test as the shading: only the reserves and the work ranked above it are counted. Moving it earlier can turn something below it red."],
   ["Nothing is scheduled automatically.",
    "smolplan shows where things fit and what breaks. A human decides."],
 ];
@@ -1811,6 +2091,8 @@ function renderRules() {
   const status = (cls, label, text) =>
     [el("span", { class: `chip ${cls}` }, cls === "red" ? "\u25b2 " + label : label),
      el("span", { class: "muted" }, text)];
+  const edge = (key, label, text) =>
+    [el("span", { class: "edge-label" }, key, label), el("span", { class: "muted" }, text)];
 
   return el(
     "div",
@@ -1839,6 +2121,23 @@ function renderRules() {
       status("archived", "Archived", "Set aside. Excluded from the plan entirely.")),
     el("p", { class: "muted" },
       "Red bars are hatched and carry a \u25b2 as well as being red, so status never depends on colour alone."),
+    el("p", { class: "muted" },
+      "A bar\u2019s ends can glow too, saying which way it has room to move:"),
+    el("div", { class: "statuses" },
+      edge(edgeKey("glow-start"), "Blue start",
+        "Green, not started yet, and would still be green starting earlier \u2014 as early "
+        + "as the month in its tooltip."),
+      edge(edgeKey("glow-capacity"), "Yellow end",
+        "Green now, but starting a month later would leave it short. It has no room to slip."),
+      edge(edgeKey("glow-deadline"), "Red end",
+        "Ends on its deadline, so it cannot move later at all, whatever the capacity (R11). "
+        + "A red bar gets one too."),
+      edge(el("i", { class: "tick-key" }), "Red line",
+        "The deadline itself: a thin line at the end of that month, in the initiative\u2019s own row.")),
+    el("p", { class: "muted" },
+      "An end cut off by the month range at the top is not drawn, so it does not glow. The "
+      + "tooltip on a bar, and the panel that opens when you click it, say all of this in "
+      + "words, so it never depends on colour either."),
     el("p", { class: "muted" },
       "On the Team capacity tab, cells shade from green when a team is idle to " +
       "red when it is fully used, so constraints stand out at a glance. The " +
@@ -1918,10 +2217,7 @@ function renderRange() {
   if (monthTo && !all.includes(monthTo)) monthTo = null;
 
   const shown = visibleMonths();
-  const options = (chosen) =>
-    all.map((m) =>
-      el("option", m === chosen ? { value: m, selected: true } : { value: m }, monthLong(m))
-    );
+  const options = (chosen) => monthOptions(all, chosen);
 
   const from = el(
     "select",
@@ -1987,7 +2283,15 @@ function render() {
     rules: renderRules,
     settings: renderSettings,
   };
+  // The view is rebuilt from scratch, timeline scroller included, and a new
+  // scroller starts at the first month. Carried across, or every keystroke in
+  // the search box and every drop of a bar would jump a plan scrolled out to
+  // next year back to this month. The browser clamps it if the plan narrowed.
+  const before = $("#view .tl-scroll");
+  const scrolled = before ? before.scrollLeft : 0;
   setChildren($("#view"), views[view]());
+  const scroller = $("#view .tl-scroll");
+  if (scroller && scrolled) scroller.scrollLeft = scrolled;
   for (const button of document.querySelectorAll("#tabs button")) {
     button.classList.toggle("on", button.dataset.view === view);
   }
@@ -1996,7 +2300,7 @@ function render() {
   const settings = state.settings;
   setChildren($("#clock"), 
     el("span", {}, "Current month "),
-    el("b", { class: settings.current_month_override ? "fake" : "" }, settings.current_month),
+    el("b", { class: settings.current_month_override ? "fake" : "" }, monthLong(settings.current_month)),
     el("span", {}, settings.current_month_override ? " (override)" : "")
   );
 }

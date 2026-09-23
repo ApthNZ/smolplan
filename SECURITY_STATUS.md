@@ -24,8 +24,8 @@ oversight.
 | Concern | Status | How |
 |---|---|---|
 | SQL injection | ✅ | Every query is parameterised. The two f-string SQL sites interpolate an allowlisted column name (`update_initiative`) and a hardcoded table tuple (`seed_fixture`) — never user input. |
-| Input validation | ✅ | Months must match `YYYY-MM`; FTE is an integer 0–10000 hundredths; demand offsets are 0–119; spans are capped at 240 months; names are length-bounded by pydantic. |
-| Mass assignment | ✅ | `update_initiative` writes only fields on an explicit allowlist. |
+| Input validation | ✅ | Months must match `YYYY-MM` exactly, with no trailing newline — the start, end and deadline of an initiative, supply and reserve ranges, and the clock; FTE is an integer 0–10000 hundredths; demand offsets are 0–119; spans are capped at 240 months; names are length-bounded by pydantic. |
+| Mass assignment | ✅ | `update_initiative` writes only fields on an explicit allowlist. The stored `duration_m` is not on it: only `end_month` sets it, the path that checks it against the start and the deadline. |
 | Path traversal | ✅ | Static files are served by Starlette's `StaticFiles`, which resolves and confines paths. Covered by tests. |
 | Secrets in the tree | ✅ | None exist — the app has no API keys, tokens or passwords. A test scans for them anyway. |
 | Database exposure | ✅ | `SMOLPLAN_DB` is deployment configuration, never user input; no route reflects it. |
@@ -46,9 +46,9 @@ oversight.
 
 ## Tests
 
-`tests/test_security.py` — 22 tests covering injection through every field the
+`tests/test_security.py` — 36 tests covering injection through every field the
 API accepts, the column allowlist, month and FTE validation, static-path
 traversal, and a secret scan over the source tree. Formula neutralisation in the
 export is covered in `tests/test_api.py`, alongside the rest of its behaviour.
 
-Run with `pytest -q` alongside the engine, API and frontend suites.
+Run with `pytest -q` alongside the engine, API, import and frontend suites.

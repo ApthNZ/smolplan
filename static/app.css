@@ -12,6 +12,10 @@
   --red-bg: #fbdedb;
   --grey-bg: #e7e9ed;
   --hint: #cfe0ff;
+  /* The edge glows on portfolio bars, and the deadline tick. */
+  --glow-start: #2f6feb;
+  --glow-capacity: #d9a200;
+  --glow-deadline: #d93025;
   --row: 30px;
   --col: 46px;
   --side: 300px;
@@ -32,6 +36,9 @@
     --red-bg: #45211d;
     --grey-bg: #2b2f37;
     --hint: #26375c;
+    --glow-start: #6c9bff;
+    --glow-capacity: #f2c94c;
+    --glow-deadline: #ff5a4f;
   }
 }
 
@@ -227,6 +234,48 @@ label { color: var(--muted); display: block; margin-bottom: 2px; }
 .bar.locked { cursor: not-allowed; }
 .bar.dragging { opacity: .85; box-shadow: 0 2px 8px rgba(0,0,0,.25); z-index: 5; }
 .bar .icon { font-weight: 700; }
+
+/* Edge glows: blue on the start edge when the bar could start earlier, yellow
+   on the end edge when a month later would leave it short, red there instead
+   when it ends on its deadline. Each edge has its own variable feeding one
+   box-shadow, so a bar can wear a start glow and an end glow at once, and a
+   class only sets a variable, so nothing here competes with the status rules.
+   Each glow is a stripe inside the edge, which the scroll area cannot clip,
+   and a short haze outside it. The colours are theme variables set in the
+   :root pair at the top, so there is no dark override here to get out of
+   order. .bar.dragging outranks this and drops the glows mid-drag. */
+.bar, .edge-key {
+  box-shadow:
+    inset 3px 0 var(--edge-start, transparent),
+    -3px 0 6px -2px var(--edge-start, transparent),
+    inset -3px 0 var(--edge-end, transparent),
+    3px 0 6px -2px var(--edge-end, transparent);
+}
+.glow-start { --edge-start: var(--glow-start); }
+.glow-capacity { --edge-end: var(--glow-capacity); }
+.glow-deadline { --edge-end: var(--glow-deadline); }
+
+/* The deadline: a thin line at the right edge of its month. The element is
+   wider than the line so its tooltip can be found with a mouse, and sits
+   entirely inside the month so the last column cannot push the timeline into
+   scrolling. The bar is appended after it and so paints over it where they
+   meet, which keeps a drag from starting on the tick instead. */
+.deadline-tick { position: absolute; top: 2px; bottom: 2px; width: 6px; margin-left: -6px; }
+.deadline-tick::after {
+  content: ""; position: absolute; top: 0; bottom: 0; right: 0; width: 2px;
+  border-radius: 1px; background: var(--glow-deadline);
+}
+
+/* The same marks, small, for the legend and the Rules tab. */
+.edge-key {
+  display: inline-block; width: 22px; height: 12px; margin-right: 6px; vertical-align: -2px;
+  border: 1px solid var(--green); border-radius: 3px; background: var(--green-bg);
+}
+.tick-key {
+  display: inline-block; width: 2px; height: 13px; margin: 0 7px 0 4px; vertical-align: -2px;
+  border-radius: 1px; background: var(--glow-deadline);
+}
+.edge-label { white-space: nowrap; font-size: 11px; }
 .reserve-cell {
   position: absolute; top: 0; height: 100%; width: var(--col);
   display: flex; align-items: center; justify-content: center;
@@ -236,6 +285,7 @@ label { color: var(--muted); display: block; margin-bottom: 2px; }
 .legend { color: var(--muted); margin: 10px 2px; display: flex; gap: 14px; flex-wrap: wrap; }
 .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
 .toolbar .spacer { flex: 1; }
+.toolbar input.search { width: 190px; }
 
 /* What is holding a team's capacity, under the shortfall it explains. */
 .cause { font-size: 11px; line-height: 1.35; margin: 1px 0 4px; }

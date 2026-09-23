@@ -371,6 +371,179 @@ def test_parser_reports_unknown_teams_when_none_exist():
     assert "add a team first" in errors[0]
 
 
+# --- the Deadline column -----------------------------------------------------
+
+WITH_DEADLINE = HEADER + ",Deadline"
+TEAMS = [{"id": 1, "name": "SOC"}, {"id": 2, "name": "GRC"}]
+
+
+def test_a_deadline_column_sets_the_deadline(client):
+    response = post(client, WITH_DEADLINE + "\nDue,PRO-1,2027-02,2027-04,1,,2027-06\n")
+    assert response.status_code == 200, response.json()
+    due = by_name(response.json())["Due"]
+    assert (due["end_month"], due["deadline_month"]) == ("2027-04", "2027-06")
+
+
+def test_the_import_sets_the_end_from_the_span(client):
+    due = by_name(post(client, HEADER + "\nSpan,PRO-1,2027-02,2027-09,1,\n").json())["Span"]
+    assert (due["end_month"], due["length"]) == ("2027-09", 8)
+
+
+def test_a_deadline_may_be_a_full_date(client):
+    response = post(client, WITH_DEADLINE + "\nDue,PRO-1,2027-02,2027-04,1,,30/06/2027 0:00\n")
+    assert response.status_code == 200, response.json()
+    assert by_name(response.json())["Due"]["deadline_month"] == "2027-06"
+
+
+def test_a_blank_deadline_on_a_new_row_is_no_deadline(client):
+    response = post(client, WITH_DEADLINE + "\nOpen,PRO-1,2027-02,2027-04,1,,\n")
+    assert response.status_code == 200, response.json()
+    assert by_name(response.json())["Open"]["deadline_month"] is None
+
+
+def test_without_the_column_an_update_keeps_its_deadline(client):
+    post(client, WITH_DEADLINE + "\nDue,PRO-1,2027-02,2027-04,1,,2027-06\n")
+    again = post(client, HEADER + "\nDue,PRO-1,2027-03,2027-05,1,\n")
+    assert again.status_code == 200, again.json()
+    due = by_name(again.json())["Due"]
+    assert (due["end_month"], due["deadline_month"]) == ("2027-05", "2027-06")
+
+
+def test_with_the_column_a_blank_cell_clears_the_deadline(client):
+    """The file is authoritative for every column it has, as a blank team cell
+    clears that team's demand."""
+    post(client, WITH_DEADLINE + "\nDue,PRO-1,2027-02,2027-04,1,,2027-06\n")
+    again = post(client, WITH_DEADLINE + "\nDue,PRO-1,2027-02,2027-04,1,,\n").json()
+    assert by_name(again)["Due"]["deadline_month"] is None
+
+
+def test_the_column_moves_a_deadline_set_in_the_editor(client):
+    state = post(client, HEADER + "\nDue,PRO-1,2027-02,2027-04,1,\n").json()
+    due = by_name(state)["Due"]
+    client.patch(f"/api/initiatives/{due['id']}", json={"deadline_month": "2027-05"})
+
+    again = post(client, WITH_DEADLINE + "\nDue,PRO-1,2027-02,2027-08,1,,2027-09\n")
+    assert again.status_code == 200, again.json()
+    due = by_name(again.json())["Due"]
+    assert (due["end_month"], due["deadline_month"]) == ("2027-08", "2027-09")
+
+
+def test_an_end_after_the_rows_own_deadline_is_refused(client):
+    before = client.get("/api/state").json()
+    response = post(client, WITH_DEADLINE + "\nLate,PRO-1,2027-02,2027-07,1,,2027-06\n")
+    assert response.status_code == 400
+    assert response.json()["detail"]["errors"] == [
+        "Line 2: EndMonth 2027-07 is after the Deadline 2027-06."
+    ]
+    assert client.get("/api/state").json()["initiatives"] == before["initiatives"]
+
+
+@pytest.mark.parametrize("written", ["soon", "2027-13", "32/06/2027"])
+def test_a_malformed_deadline_is_refused_in_the_files_own_words(client, written):
+    response = post(client, WITH_DEADLINE + f"\nDue,PRO-1,2027-02,2027-04,1,,{written}\n")
+    assert response.status_code == 400
+    assert response.json()["detail"]["errors"] == [
+        f"Line 2: Deadline {written!r} is not a month in YYYY-MM form."
+    ]
+
+
+def test_an_update_that_would_pass_an_existing_deadline_writes_nothing(client):
+    """Without a Deadline column an update keeps the deadline already set, so
+    an EndMonth past it is a breach of R11. It is caught against the plan
+    before anything is written, every such row is named, and the good rows in
+    the same file are not imported either."""
+    post(client, WITH_DEADLINE + "\n"
+        "One,PRO-1,2027-02,2027-04,1,,2027-05\n"
+        "Two,PRO-2,2027-02,2027-04,1,,2027-06\n")
+    before = client.get("/api/state").json()
+
+    response = post(client, HEADER + "\n"
+        "One,PRO-1,2027-02,2027-06,1,\n"
+        "Two,PRO-2,2027-03,2027-07,1,\n"
+        "Fine,PRO-3,2027-02,2027-04,1,\n")
+    assert response.status_code == 400
+    assert response.json()["detail"]["errors"] == [
+        "Line 2: EndMonth 2027-06 is after the deadline already set on PRO-1, May 2027. "
+        "End it by then, or add a Deadline column to move the deadline.",
+        "Line 3: EndMonth 2027-07 is after the deadline already set on PRO-2, Jun 2027. "
+        "End it by then, or add a Deadline column to move the deadline.",
+    ]
+    after = client.get("/api/state").json()
+    assert after["initiatives"] == before["initiatives"]
+    assert after["undo"]["depth"] == before["undo"]["depth"]
+
+
+def test_a_deadline_conflict_is_reported_alongside_a_parse_error(client):
+    """Every problem at once means both kinds in one reply. The deadline check
+    used to run only on a file that had parsed cleanly, so the conflict on
+    line 2 surfaced only after line 3 had been fixed — a second attempt, which
+    is what reporting everything at once is there to save."""
+    post(client, WITH_DEADLINE + "\nOne,PRO-1,2027-02,2027-04,1,,2027-06\n")
+    before = client.get("/api/state").json()
+
+    response = post(client, HEADER + "\n"
+        "One,PRO-1,2027-02,2027-09,1,\n"
+        "Two,,2027-02,2027-03,1,\n"
+        "Three,PRO-3,2027-02,2027-03,abc,1\n")
+    assert response.status_code == 400
+    assert response.json()["detail"]["errors"] == [
+        "Line 2: EndMonth 2027-09 is after the deadline already set on PRO-1, Jun 2027. "
+        "End it by then, or add a Deadline column to move the deadline.",
+        "Line 3: Reference is empty. It is what a re-import matches on.",
+        "Line 4, column SOC: 'abc' is not a number.",
+    ]
+    assert response.json()["detail"]["message"] == "Nothing was imported. 3 problems found:"
+    after = client.get("/api/state").json()
+    assert after["initiatives"] == before["initiatives"]
+    assert after["undo"]["depth"] == before["undo"]["depth"]
+
+
+def test_the_parser_hands_back_the_clean_rows_with_the_errors():
+    """So the caller can check them against the plan in the same pass. The
+    caller still writes nothing: the errors are what say so."""
+    rows, errors = importer.parse(
+        HEADER + "\nGood,PRO-1,2027-01,2027-02,1,\nBad,PRO-2,2027-01,2027-02,x,1\n", TEAMS
+    )
+    assert [r["reference"] for r in rows] == ["PRO-1"]
+    assert errors == ["Line 3, column SOC: 'x' is not a number."]
+
+
+def test_the_existing_deadline_is_matched_on_reference_case_insensitively(client):
+    post(client, WITH_DEADLINE + "\nOne,PRO-1,2027-02,2027-04,1,,2027-05\n")
+    response = post(client, HEADER + "\nOne,pro-1,2027-02,2027-06,1,\n")
+    assert response.status_code == 400
+    assert "already set on pro-1" in response.json()["detail"]["errors"][0]
+
+
+def test_a_column_called_deadline_is_never_a_team():
+    """Which is why a team cannot be called Deadline and still be imported."""
+    teams = TEAMS + [{"id": 3, "name": "Deadline"}]
+    rows, errors = importer.parse(
+        "InitiativeName,Reference,StartMonth,EndMonth,SOC,deadline\n"
+        "X,PRO-1,2027-01,2027-02,1,2027-03\n",
+        teams,
+    )
+    assert errors == []
+    assert rows[0]["deadline_month"] == "2027-03"
+    assert rows[0]["demand"] == {1: 100}
+
+
+def test_the_parser_tells_a_missing_column_from_a_blank_cell():
+    """No column leaves an existing deadline alone; a blank cell clears it.
+    The row says which by whether it has the key at all."""
+    without, _ = importer.parse(HEADER + "\nX,PRO-1,2027-01,2027-02,1,\n", TEAMS)
+    blank, _ = importer.parse(WITH_DEADLINE + "\nX,PRO-1,2027-01,2027-02,1,,\n", TEAMS)
+    assert "deadline_month" not in without[0]
+    assert blank[0]["deadline_month"] is None
+
+
+def test_an_imported_deadline_reaches_the_export(client):
+    post(client, WITH_DEADLINE + "\nTracked,PRO-77,2027-03,2027-05,0.5,,2027-08\n")
+    lines = client.get("/api/export.csv").text.splitlines()
+    assert lines[0] == "InitiativeName,Reference,StartMonth,EndMonth,Deadline"
+    assert "Tracked,PRO-77,2027-03,2027-05,2027-08" in lines
+
+
 # --- the demand-summary converter --------------------------------------------
 
 

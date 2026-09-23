@@ -101,6 +101,9 @@ def test_patch_rejects_unknown_columns(client):
     for payload in (
         {"rank": 99},
         {"id": 1},
+        # The end is stored as a duration, but only end_month may set it:
+        # that is the path that checks it against the start and the deadline.
+        {"duration_m": 1},
         {"name = 'x' WHERE 1=1 --": "y"},
         {"archived); DROP TABLE demand;--": True},
     ):
@@ -111,6 +114,7 @@ def test_patch_rejects_unknown_columns(client):
 
     after = client.get("/api/state").json()
     assert [i["rank"] for i in after["initiatives"]] == [1, 2, 3]
+    assert [i["length"] for i in after["initiatives"]] == [6, 3, 3]
     assert sum(len(i["demand"]) for i in after["initiatives"]) == 15
 
 
@@ -128,6 +132,63 @@ def test_month_strings_reaching_sql_are_validated(client):
     )
     assert response.status_code == 400
     assert client.get("/api/state").json()["supply"]  # table intact
+
+
+# "2027-06\n" because `$` also matches before a final newline: re.match let
+# it through, and it was stored with the newline in it.
+BAD_MONTHS = ["2027-06'; DROP TABLE initiative;--", "2027-13", "not-a-month", "2027-6", " ", "2027-06\n"]
+
+
+@pytest.mark.parametrize("field", ["end_month", "deadline_month"])
+@pytest.mark.parametrize("month", BAD_MONTHS)
+def test_initiative_month_fields_are_validated(client, field, month):
+    """The end and the deadline are written to the database, so they are held
+    to YYYY-MM before any SQL runs, on a create and on an edit alike."""
+    before = client.get("/api/state").json()
+    target = before["initiatives"][0]["id"]
+
+    created = client.post(
+        "/api/initiatives", json={"name": "X", "start_month": "2027-06", field: month}
+    )
+    patched = client.patch(f"/api/initiatives/{target}", json={field: month})
+    assert created.status_code == 400
+    assert patched.status_code == 400
+
+    after = client.get("/api/state").json()
+    assert after["initiatives"] == before["initiatives"]
+    assert after["undo"]["depth"] == before["undo"]["depth"]
+
+
+def test_a_trailing_newline_is_not_a_month_anywhere(client):
+    """One validator holds every month the API takes, so the start and the
+    clock are held to it too. A month stored with a newline breaks a CSV cell
+    on export and never compares equal to the month it looks like."""
+    before = client.get("/api/state").json()
+    target = before["initiatives"][0]["id"]
+    for response in (
+        client.post("/api/initiatives", json={"name": "X", "start_month": "2027-06\n"}),
+        client.patch(f"/api/initiatives/{target}", json={"start_month": "2027-06\n"}),
+        client.put("/api/settings", json={"current_month": "2027-06\n"}),
+    ):
+        assert response.status_code == 400, response.json()
+
+    after = client.get("/api/state").json()
+    assert after["initiatives"] == before["initiatives"]
+    assert after["settings"] == before["settings"]
+    assert after["undo"]["depth"] == before["undo"]["depth"]
+
+
+def test_an_imported_deadline_is_validated(client):
+    before = client.get("/api/state").json()
+    response = client.post(
+        "/api/import",
+        json={
+            "csv": "InitiativeName,Reference,StartMonth,EndMonth,SOC,Deadline\n"
+            "X,PRO-1,2027-02,2027-03,1,2027-06'); DROP TABLE initiative;--\n"
+        },
+    )
+    assert response.status_code == 400
+    assert client.get("/api/state").json()["initiatives"] == before["initiatives"]
 
 
 # --- input validation --------------------------------------------------------
@@ -155,7 +216,8 @@ def test_demand_offsets_are_bounded(client):
     initiative = state["initiatives"][0]["id"]
     team = state["teams"][0]["id"]
 
-    for offset in (-1, 10_000):
+    # 6 is inside the grid's reach but past the end of A, which runs six months.
+    for offset in (-1, 6, 10_000):
         response = client.put(
             f"/api/initiatives/{initiative}/demand",
             json={"lines": [{"team_id": team, "offset": offset, "fte_h": 50}]},

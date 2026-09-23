@@ -41,6 +41,11 @@ CREATE TABLE IF NOT EXISTS initiative (
     name                  TEXT NOT NULL,
     "rank"                INTEGER NOT NULL,
     start_month           TEXT NOT NULL,
+    -- Months the initiative runs, start inclusive. A duration rather than an
+    -- end month, so that moving the start carries the end with it, exactly as
+    -- the demand profile's offsets already do.
+    duration_m            INTEGER NOT NULL DEFAULT 1,
+    deadline_month        TEXT,
     reference             TEXT,
     owner                 TEXT NOT NULL DEFAULT '',
     notes                 TEXT NOT NULL DEFAULT '',
@@ -107,6 +112,8 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
     _drop_requested_start_month(conn)
     _add_reference(conn)
+    _add_duration(conn)
+    _add_deadline(conn)
     # Partial index: an initiative created by hand has no reference, and any
     # number of them may coexist. Imported ones are unique on it, which is what
     # lets a re-import update in place rather than duplicate.
@@ -163,6 +170,34 @@ def _add_reference(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+def _add_duration(conn: sqlite3.Connection) -> None:
+    """Add the end of an initiative to a database created before it was stored.
+
+    Until then the end was whatever the demand implied, so that is what each
+    existing initiative keeps: its last offset plus one, or a single month
+    when it has no demand at all. Nothing that was on screen moves.
+    """
+    columns = [r["name"] for r in conn.execute("PRAGMA table_info(initiative)")]
+    if "duration_m" not in columns:
+        conn.execute("ALTER TABLE initiative ADD COLUMN duration_m INTEGER NOT NULL DEFAULT 1")
+        conn.execute(
+            "UPDATE initiative SET duration_m = COALESCE("
+            "(SELECT MAX(offset_m) + 1 FROM demand WHERE demand.initiative_id = initiative.id), 1)"
+        )
+        conn.commit()
+
+
+def _add_deadline(conn: sqlite3.Connection) -> None:
+    """Add the deadline column to a database created before deadlines existed.
+
+    NULL is "no deadline", which is what every existing initiative had.
+    """
+    columns = [r["name"] for r in conn.execute("PRAGMA table_info(initiative)")]
+    if "deadline_month" not in columns:
+        conn.execute("ALTER TABLE initiative ADD COLUMN deadline_month TEXT")
+        conn.commit()
+
+
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -210,11 +245,14 @@ def load_engine_inputs(conn) -> dict:
         )
     ]
 
+    # duration_m becomes `duration`, as offset_m becomes `offset` below: the
+    # engine's names, not the table's.
     initiatives = [
         dict(r)
         for r in conn.execute(
-            'SELECT id, name, "rank", start_month, reference, owner, '
-            "notes, archived FROM initiative ORDER BY \"rank\""
+            'SELECT id, name, "rank", start_month, duration_m AS duration, '
+            "deadline_month, reference, owner, notes, archived "
+            'FROM initiative ORDER BY "rank"'
         )
     ]
     for initiative in initiatives:
@@ -445,16 +483,16 @@ def seed_fixture(conn, anchor: str | None = None) -> None:
 
     stamp = now()
     plan = [
-        ("A", 1, anchor, [("SOC", range(3), 100), ("GRC", range(6), 50)]),
-        ("B", 2, month_add(anchor, 1), [("GRC", range(3), 50)]),
-        ("C", 3, month_add(anchor, 3), [("SOC", range(3), 50)]),
+        ("A", 1, anchor, 6, [("SOC", range(3), 100), ("GRC", range(6), 50)]),
+        ("B", 2, month_add(anchor, 1), 3, [("GRC", range(3), 50)]),
+        ("C", 3, month_add(anchor, 3), 3, [("SOC", range(3), 50)]),
     ]
-    for name, rank, start, profile in plan:
+    for name, rank, start, duration, profile in plan:
         initiative_id = conn.execute(
-            'INSERT INTO initiative (name, "rank", start_month, '
+            'INSERT INTO initiative (name, "rank", start_month, duration_m, '
             "owner, notes, archived, created_at, updated_at) "
-            "VALUES (?, ?, ?, '', '', 0, ?, ?)",
-            (name, rank, start, stamp, stamp),
+            "VALUES (?, ?, ?, ?, '', '', 0, ?, ?)",
+            (name, rank, start, duration, stamp, stamp),
         ).lastrowid
         for team, offsets, fte in profile:
             for offset in offsets:

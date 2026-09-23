@@ -1,19 +1,24 @@
 """CSV import parsing.
 
 Pure module: no database, no web framework. It turns CSV text plus the set of
-known teams into either a list of rows ready to write, or a list of every
-problem found — never a partial result. A forty-row export should tell you
-everything wrong with it in one go, not one error per attempt.
+known teams into a list of rows ready to write and a list of every problem
+found. A forty-row export should tell you everything wrong with it in one go,
+not one error per attempt. When there are problems the rows are only the ones
+that parsed cleanly, handed back so the caller can check them against the plan
+too, and nothing may be written.
 
 Expected shape, matched by header name so column order does not matter:
 
     InitiativeName,Reference,StartMonth,EndMonth,SOC,GRC
     Project123,PRO-001,2026-09,2026-12,1,0.5
 
-Every column that is not one of the four known headers is a team name, and its
+An optional Deadline column carries each initiative's deadline month. Every
+other column that is not one of the known headers is a team name, and its
 value is that team's FTE for every month from StartMonth to EndMonth inclusive.
+That is why a team cannot be called Deadline here: its column would be read as
+the deadline.
 
-StartMonth and EndMonth may also arrive as full dates — see month_of.
+StartMonth, EndMonth and Deadline may also arrive as full dates — see month_of.
 """
 
 from __future__ import annotations
@@ -29,7 +34,8 @@ NAME = "initiativename"
 REFERENCE = "reference"
 START = "startmonth"
 END = "endmonth"
-RESERVED = {NAME, REFERENCE, START, END}
+DEADLINE = "deadline"  # optional
+RESERVED = {NAME, REFERENCE, START, END, DEADLINE}
 
 MAX_FTE_H = 10000  # 100.00 FTE, matching the API
 MAX_SPAN = 120  # months; demand offsets run 0-119
@@ -113,6 +119,15 @@ def parse(text: str, teams: list[dict]) -> tuple[list[dict], list[str]]:
 
     `teams` is the list of {"id", "name"} dicts the API already holds. Returns
     (rows, errors); if errors is non-empty the caller must write nothing.
+
+    A problem with a row still leaves the other rows in `rows`, so the caller
+    can check those against the plan in the same pass and report both kinds of
+    problem at once, rather than the second only once the first is fixed. A
+    problem with the file as a whole (its headers, its size) returns no rows.
+
+    A row carries `deadline_month` only when the file has a Deadline column,
+    and then a blank cell is None. The difference matters to an update: no
+    column leaves the deadline as it was, a blank cell clears it.
     """
     by_name = {key(t["name"]): t for t in teams}
     known = ", ".join(sorted(t["name"] for t in teams)) or "none — add a team first"
@@ -171,6 +186,9 @@ def parse(text: str, teams: list[dict]) -> tuple[list[dict], list[str]]:
         return [], [f"{len(data_rows)} rows is more than the limit of {MAX_ROWS}."]
 
     index = {name: lower.index(name) for name in (NAME, REFERENCE, START, END)}
+    has_deadline = DEADLINE in lower
+    if has_deadline:
+        index[DEADLINE] = lower.index(DEADLINE)
     rows: list[dict] = []
     seen: dict[str, int] = {}
 
@@ -221,6 +239,14 @@ def parse(text: str, teams: list[dict]) -> tuple[list[dict], list[str]]:
                     )
                     months = []
 
+        deadline = None  # a blank cell is no deadline, and clears one on an update
+        if has_deadline and cell(index[DEADLINE]):
+            deadline = month_of(cell(index[DEADLINE]))
+            if not MONTH_RE.match(deadline):
+                errors.append(f"Line {line}: Deadline {deadline!r} is not a month in YYYY-MM form.")
+            elif MONTH_RE.match(end) and month_index(end) > month_index(deadline):
+                errors.append(f"Line {line}: EndMonth {end} is after the Deadline {deadline}.")
+
         demand: dict[int, int] = {}
         for position, heading in team_columns:
             value = cell(position)
@@ -240,20 +266,19 @@ def parse(text: str, teams: list[dict]) -> tuple[list[dict], list[str]]:
             )
 
         if len(errors) == before and months:
-            rows.append(
-                {
-                    "line": line,
-                    "name": name,
-                    "reference": reference,
-                    "start_month": start,
-                    "months": len(months),
-                    "demand": demand,
-                }
-            )
+            row = {
+                "line": line,
+                "name": name,
+                "reference": reference,
+                "start_month": start,
+                "months": len(months),
+                "demand": demand,
+            }
+            if has_deadline:
+                row["deadline_month"] = deadline
+            rows.append(row)
 
-    if errors:
-        return [], errors
-    return rows, []
+    return rows, errors
 
 
 # --- the demand-summary converter --------------------------------------------

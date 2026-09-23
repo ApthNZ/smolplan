@@ -351,3 +351,258 @@ def test_the_consumer_list_is_a_snapshot_not_a_live_reference():
     cell = result["cells"][("GRC", first["month"])]
     assert len(first["taken_by"]) <= len(cell["consumers"])
     assert first["taken_by"] is not cell["consumers"]
+
+
+# --- edge glows: earliest_start and end_limit --------------------------------
+
+
+def outcome(result, initiative_id):
+    return result["initiatives"][initiative_id]
+
+
+def moved(initiative_id, **changes):
+    """The fixture's initiatives, with one of them changed."""
+    _, _, _, initiatives, _ = fixture()
+    initiatives = copy.deepcopy(initiatives)
+    for initiative in initiatives:
+        if initiative["id"] == initiative_id:
+            initiative.update(changes)
+    return initiatives
+
+
+def test_a_green_initiative_that_could_start_sooner_says_how_soon():
+    """C moved out to August. SOC is full until A's SOC demand ends in March,
+    so April is the earliest C would still be green."""
+    result = run(initiatives=moved("C", start_month="2027-08"))
+    assert status(result, "C") == "green"
+    assert outcome(result, "C")["earliest_start"] == "2027-04"
+    assert outcome(result, "C")["end_limit"] is None
+
+
+def test_an_initiative_already_at_its_earliest_start_has_no_start_glow():
+    result = run()
+    assert status(result, "C") == "green"
+    assert outcome(result, "C")["earliest_start"] is None
+
+
+def test_the_start_glow_agrees_with_the_drag_shading():
+    """Both come from the same fit test, so the glow can never promise a month
+    the drag would not shade."""
+    teams, supply, reserves, _, demand = fixture()
+    initiatives = moved("C", start_month="2027-09")
+    result = allocate(teams, supply, reserves, initiatives, demand, CURRENT, HORIZON)
+    hints = fit_hints(teams, supply, reserves, initiatives, demand, CURRENT, "C", HORIZON)
+    assert outcome(result, "C")["earliest_start"] == hints[0] == "2027-04"
+
+
+def test_the_start_glow_ignores_lower_ranked_work():
+    """D sits in April to June below C. C would still fit there, because it
+    pre-empts D — moving it would turn D red, as a drag there would."""
+    teams, supply, reserves, _, demand = fixture()
+    initiatives = moved("C", start_month="2027-08") + [
+        {"id": "D", "name": "D", "rank": 4, "start_month": "2027-04", "archived": False}
+    ]
+    demand = demand + [
+        {"initiative_id": "D", "team_id": "SOC", "offset": o, "fte_h": 100} for o in range(3)
+    ]
+    result = allocate(teams, supply, reserves, initiatives, demand, CURRENT, HORIZON)
+    assert status(result, "D") == "green"
+    assert outcome(result, "C")["earliest_start"] == "2027-04"
+
+
+def test_an_initiative_under_way_gets_no_start_glow():
+    """A started in January. It cannot start any sooner than it already has."""
+    for current in ("2027-01", "2027-02"):
+        result = run(current=current)
+        assert status(result, "A") == "green"
+        assert outcome(result, "A")["earliest_start"] is None
+
+
+def single_team(start="2027-06", **extra):
+    """One team with a hole in its supply in June, and one initiative X."""
+    supply = {("T", m): 100 for m in month_span("2027-01", "2027-12")}
+    supply[("T", "2027-06")] = 0
+    initiative = {"id": "X", "name": "X", "rank": 1, "start_month": start, **extra}
+    demand = [{"initiative_id": "X", "team_id": "T", "offset": 0, "fte_h": 50}]
+    return allocate(["T"], supply, [], [initiative], demand, CURRENT, HORIZON)
+
+
+def test_a_red_initiative_gets_no_start_or_capacity_glow():
+    """Red means it does not fit where it is. Saying it could also start
+    sooner, or could not slip, would be a claim about a plan it is not in."""
+    result = single_team()
+    assert status(result, "X") == "red"
+    assert outcome(result, "X")["earliest_start"] is None
+    assert outcome(result, "X")["end_limit"] is None
+
+
+def test_a_red_initiative_on_its_deadline_still_cannot_move_later():
+    result = single_team(deadline_month="2027-06")
+    assert status(result, "X") == "red"
+    assert outcome(result, "X")["end_limit"] == "deadline"
+    assert outcome(result, "X")["earliest_start"] is None
+
+
+def test_one_month_later_being_short_is_a_capacity_limit():
+    """July is full. C (April to June) is fine where it is, but a month later
+    it would run into July. Later starts that clear July exist — the limit is
+    about slipping by one month, not about never fitting again."""
+    teams, supply, reserves, initiatives, demand = fixture()
+    supply = dict(supply)
+    supply[("SOC", "2027-07")] = 100  # all of it held by BAU
+    result = allocate(teams, supply, reserves, initiatives, demand, CURRENT, HORIZON)
+    assert status(result, "C") == "green"
+    assert outcome(result, "C")["end_limit"] == "capacity"
+
+    hints = fit_hints(teams, supply, reserves, initiatives, demand, CURRENT, "C", HORIZON)
+    assert "2027-05" not in hints and "2027-08" in hints
+
+
+def test_supply_running_out_is_a_capacity_limit():
+    """C ends in December 2028, the last month anyone has supply for."""
+    result = run(initiatives=moved("C", start_month="2028-10"))
+    assert status(result, "C") == "green"
+    assert outcome(result, "C")["end_limit"] == "capacity"
+
+
+def test_a_deadline_outranks_capacity():
+    """Both are true, but the deadline is the one no capacity can fix."""
+    result = run(initiatives=moved("C", start_month="2028-10", deadline_month="2028-12"))
+    assert outcome(result, "C")["end_limit"] == "deadline"
+
+
+@pytest.mark.parametrize(
+    "deadline,limit",
+    [("2027-05", "deadline"), ("2027-06", "deadline"), ("2027-07", None), ("2027-12", None)],
+)
+def test_a_deadline_limits_only_an_initiative_that_reaches_it(deadline, limit):
+    # C runs April to June.
+    result = run(initiatives=moved("C", deadline_month=deadline))
+    assert outcome(result, "C")["end_limit"] == limit
+
+
+def test_an_initiative_with_no_demand_fits_anywhere():
+    """Nothing to staff, so the fit test passes everywhere: the earliest start
+    is now, and it can always slip — unless its deadline says otherwise."""
+    extra = {"id": "E", "name": "E", "rank": 4, "start_month": "2027-05", "archived": False}
+    result = run(initiatives=moved("C") + [extra])
+    assert status(result, "E") == "green"
+    assert outcome(result, "E")["earliest_start"] == CURRENT
+    assert outcome(result, "E")["end_limit"] is None
+
+    # The end comes from the stored duration here, since there is no demand
+    # to read one from: May, June, July.
+    pinned = dict(extra, duration=3, deadline_month="2027-07")
+    result = run(initiatives=moved("C") + [pinned])
+    assert outcome(result, "E")["end_limit"] == "deadline"
+
+
+def test_without_a_stored_duration_the_end_is_read_off_the_demand():
+    """The fixture's dicts carry neither new key. A's demand runs to offset 5,
+    so it ends in June."""
+    on_it = run(initiatives=moved("A", deadline_month="2027-06"))
+    clear = run(initiatives=moved("A", deadline_month="2027-07"))
+    assert outcome(on_it, "A")["end_limit"] == "deadline"
+    assert outcome(clear, "A")["end_limit"] is None
+
+
+def test_a_stored_duration_wins_over_the_demand():
+    """An initiative can run on past its last month of demand."""
+    result = run(initiatives=moved("A", duration=9, deadline_month="2027-09"))
+    assert outcome(result, "A")["end_limit"] == "deadline"
+
+
+def test_past_is_read_off_the_stored_end_not_the_demand():
+    """A runs Jan to Dec with demand only in January. By March all of its
+    demand is behind the clock, but it runs to December, so it is not past:
+    it is live, green because it needs nothing more, and still on its
+    deadline. Read off the demand, it used to turn grey 'past' with its end
+    still on screen, and lose the deadline glow and tick with it."""
+    teams, supply, reserves, _, _ = fixture()
+    initiatives = moved("A", duration=12, deadline_month="2027-12")
+    demand = [{"initiative_id": "A", "team_id": "SOC", "offset": 0, "fte_h": 100}]
+    for current in ("2027-03", "2027-12"):
+        result = allocate(teams, supply, reserves, initiatives, demand, current, HORIZON)
+        assert status(result, "A") == "green", current
+        assert outcome(result, "A")["end_limit"] == "deadline", current
+        assert outcome(result, "A")["earliest_start"] is None, current
+
+    # Once the end itself is behind the clock, it is past.
+    result = allocate(teams, supply, reserves, initiatives, demand, "2028-01", HORIZON)
+    assert status(result, "A") == "past"
+    assert outcome(result, "A")["end_limit"] is None
+
+
+def test_an_initiative_with_no_demand_is_past_once_its_end_is():
+    """It has a stored span, so it lies behind the clock like any other, and
+    does not go on claiming it cannot slip past a deadline already gone."""
+    extra = {
+        "id": "E", "name": "E", "rank": 4, "start_month": "2026-06", "archived": False,
+        "duration": 3, "deadline_month": "2026-08",
+    }
+    result = run(initiatives=moved("C") + [extra])
+    assert status(result, "E") == "past"
+    assert outcome(result, "E")["end_limit"] is None
+
+
+def test_every_outcome_carries_both_edges():
+    """The engine still takes initiative dicts without the new keys, and every
+    status — archived and past included — answers both questions."""
+    initiatives = moved("A", archived=True) + [
+        {"id": "P", "name": "P", "rank": 4, "start_month": "2026-01", "archived": False}
+    ]
+    teams, supply, reserves, _, demand = fixture()
+    demand = demand + [{"initiative_id": "P", "team_id": "SOC", "offset": 0, "fte_h": 10}]
+    result = allocate(teams, supply, reserves, initiatives, demand, CURRENT, HORIZON)
+
+    assert {i: status(result, i) for i in "ABCP"} == {
+        "A": "archived", "B": "green", "C": "green", "P": "past",
+    }
+    for key in "AP":
+        assert outcome(result, key)["earliest_start"] is None
+        assert outcome(result, key)["end_limit"] is None
+
+
+def test_the_edges_are_read_before_the_initiative_takes_its_share():
+    """C takes all of SOC's spare 1.00 from May to July. Were its own share in
+    the cells when its glows were worked out, it would crowd itself out of
+    every month it overlaps, and look stuck where it is."""
+    teams, supply, reserves, _, demand = fixture()
+    demand = [d for d in demand if d["initiative_id"] != "C"] + [
+        {"initiative_id": "C", "team_id": "SOC", "offset": o, "fte_h": 100} for o in range(3)
+    ]
+    initiatives = moved("C", start_month="2027-05")
+    result = allocate(teams, supply, reserves, initiatives, demand, CURRENT, HORIZON)
+    assert status(result, "C") == "green"
+    assert outcome(result, "C")["earliest_start"] == "2027-04"
+    assert outcome(result, "C")["end_limit"] is None
+
+
+# --- fit hints and the deadline ----------------------------------------------
+
+
+def test_fit_hints_never_offer_a_start_past_the_deadline():
+    """B fits from July onwards. A deadline of December means its three
+    months must start by October, however much room there is after."""
+    teams, supply, reserves, _, demand = fixture()
+    initiatives = moved("B", deadline_month="2027-12")
+    hints = fit_hints(teams, supply, reserves, initiatives, demand, CURRENT, "B", HORIZON)
+    assert hints == month_span("2027-07", "2027-10")
+
+
+def test_fit_hints_measure_the_deadline_from_the_stored_end():
+    """Six months long with three of demand: only a July start ends by December."""
+    teams, supply, reserves, _, demand = fixture()
+    initiatives = moved("B", duration=6, deadline_month="2027-12")
+    hints = fit_hints(teams, supply, reserves, initiatives, demand, CURRENT, "B", HORIZON)
+    assert hints == ["2027-07"]
+
+
+def test_month_name():
+    from engine import month_name
+
+    assert month_name("2026-09") == "Sep 2026"
+    assert month_name("2027-01") == "Jan 2027"
+    assert month_name("2027-12") == "Dec 2027"
+    with pytest.raises(ValueError):
+        month_name("2027-13")

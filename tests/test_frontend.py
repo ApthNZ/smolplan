@@ -214,3 +214,296 @@ def test_replacing_the_plan_goes_through_one_place():
     assert "exportCsv = null" in helper.group(1), (
         "setState does not drop the cached export"
     )
+
+
+def _function(source, name):
+    """The body of a top-level `function name(...) {`, up to its closing brace."""
+    match = re.search(rf"^function {name}\(.*?^\}}", source, re.DOTALL | re.MULTILINE)
+    assert match, f"{name} is missing"
+    return match.group(0)
+
+
+def test_the_editor_grid_is_as_long_as_the_initiative():
+    """The grid used to open at a guess of six to twenty-four columns and grow
+    three at a time. Now it is the duration, and Save sends only the columns on
+    screen — so any cap on the column count would quietly delete every month
+    of demand past it. The "+3 months" button is gone because the end month
+    replaced it."""
+    source = APP_JS.read_text()
+    editor = _function(source, "openEditor")
+    assert '"+3 months"' not in source
+    assert "let columns = data.length;" in editor, "the grid is not sized by the duration"
+    assert not re.search(r"columns = Math\.min\(\d+", editor), "the grid has a column cap"
+
+
+def test_save_sends_the_dates_and_only_the_columns_on_screen():
+    """Values typed into columns that a shorter end then cut off are kept, so
+    moving the end back out restores them — but they must not be sent, or the
+    demand PUT is refused for running past the end."""
+    source = APP_JS.read_text()
+    editor = _function(source, "openEditor")
+    save = re.search(r"async function save\(\) \{(.*?)\n  \}", editor, re.DOTALL)
+    assert save, "the editor's save is missing"
+    body = save.group(1)
+    assert ".filter((line) => line.offset < columns)" in body
+    assert "end_month: end()" in body
+    assert "deadline_month: deadline" in body, "a cleared deadline must be sent as null"
+    assert body.count("...dates") == 2, "create and edit must both send the dates"
+
+
+def test_the_deadline_clamp_is_worked_out_from_the_length_asked_for():
+    """The clamp used to take months off `columns` for good. A start moved
+    into the deadline and then moved back left the initiative shorter, the
+    note gone, and Save writing the shorter end; stepping the start with the
+    arrow keys reported one month cut when three had gone. The length asked
+    for is kept apart, and only the End list changes it."""
+    editor = _function(APP_JS.read_text(), "openEditor")
+    clamp = re.search(r"function clampToDeadline\(\) \{(.*?)\n  \}", editor, re.DOTALL)
+    assert clamp, "clampToDeadline is missing"
+    body = clamp.group(1)
+    assert "columns -=" not in body, "the clamp is one-way again"
+    assert "Math.min(wanted," in body and "clamped = wanted - columns" in body
+
+    end_change = re.search(r'endSelect\.addEventListener\("change", \(\) => \{(.*?)\}\);', editor, re.DOTALL)
+    assert end_change and "wanted = columns =" in end_change.group(1)
+    for other in ("startSelect", "deadlineSelect"):
+        handler = re.search(rf'{other}\.addEventListener\("change", \(\) => \{{(.*?)\}}\);', editor, re.DOTALL)
+        assert handler and "wanted" not in handler.group(1), f"{other} must not change the length asked for"
+
+
+def test_the_note_never_advises_moving_the_end_past_the_deadline():
+    """The End list stops at the deadline, so with the end on it "move the end
+    month out again" is advice the form refuses to let anyone take."""
+    editor = _function(APP_JS.read_text(), "openEditor")
+    note = re.search(r"function drawNote\(\) \{(.*?)\n  \}", editor, re.DOTALL)
+    assert note, "drawNote is missing"
+    body = note.group(1)
+    assert "mIndex(end()) >= mIndex(deadline)" in body
+    assert "move the deadline out to keep it" in body
+    assert "move the deadline out, then the end month" in body
+    assert "${advice}.`" in body, "the advice is not chosen by the deadline"
+
+
+def test_a_rerender_keeps_the_timeline_where_it_was_scrolled():
+    """render() replaces the timeline's scroller, and a new one starts at the
+    first month. The search re-renders on every keystroke, so a plan scrolled
+    out to next year jumped back to this month at each letter typed."""
+    body = _function(APP_JS.read_text(), "render")
+    assert '$("#view .tl-scroll")' in body
+    read = body.index(".scrollLeft")
+    rebuild = body.index('setChildren($("#view")')
+    assert read < rebuild < body.index("scroller.scrollLeft = scrolled"), (
+        "the scroll has to be read off the old scroller and set on the new one"
+    )
+
+
+def test_a_bar_off_the_window_is_not_drawn_as_ended():
+    """With the month window narrowed, work after it — or before it and still
+    running — used to be drawn as grey "ended", titled "Ended before the
+    current month": untrue, and a red initiative lost its colour with it."""
+    row = _function(APP_JS.read_text(), "timelineRow")
+    branch = re.search(r"if \(cells <= 0\) \{(.*?)\n    return row;\n  \}", row, re.DOTALL)
+    assert branch, "the off-screen branch is missing"
+    body = branch.group(1)
+    assert "const later = offset >= months.length;" in body
+    assert 'class: `bar ${initiative.status}`' in body, "the chip must keep the status colour"
+    assert 'const ended = initiative.status === "past";' in body
+    assert re.search(r'ended\s*\? "Ended before the current month"', body)
+    assert '"later"' in body and '"earlier"' in body
+
+
+def test_month_dropdowns_are_labelled_with_names():
+    """A dropdown is read, so it shows "Sep 2026"; its value stays YYYY-MM,
+    because that is what the API takes. One helper builds every month list so
+    the two cannot come apart."""
+    source = APP_JS.read_text()
+    helper = _function(source, "monthOptions")
+    assert "{ value: m" in helper and "monthLong(m)" in helper
+
+    editor = _function(source, "openEditor")
+    for select in ("startSelect", "endSelect", "deadlineSelect"):
+        assert re.search(rf"setChildren\(\s*{select},[^;]*monthOptions\(", editor), (
+            f"{select} is not built from monthOptions"
+        )
+    assert "monthOptions(all, chosen)" in _function(source, "renderRange")
+
+    # An option whose text is the raw month string is the mistake itself.
+    assert not re.search(r'el\("option",[^\n]*\},\s*[\w.]*(?:\bm|month)\)', source)
+
+
+def test_no_month_is_shown_to_a_person_as_yyyy_mm():
+    """Every month a person reads goes through monthLong, monthLabel or
+    monthParts. The sweep that introduced month names found six places quoting
+    the raw string — the header clock, drawer headings, tooltips, the
+    shortfall list — and each looked fine on its own."""
+    source = APP_JS.read_text()
+    raw = []
+    for match in re.finditer(r"\$\{[\w.]*month\}", source, re.IGNORECASE):
+        line = source[source.rfind("\n", 0, match.start()) : source.find("\n", match.end())]
+        if "state.cells[" in line:
+            continue  # the cells key, which is the API's format, not text
+        raw.append(line.strip())
+    # A bare month handed to el() as a child is the other way to print one.
+    raw += re.findall(r"el\([^;\n]*,\s*[\w.]*(?:_month|\.month)\)", source)
+    assert not raw, f"months shown as YYYY-MM: {raw}"
+
+
+def test_search_keeps_focus_and_caret_across_the_rerender():
+    """render() rebuilds the whole view, input box included. Without putting
+    the focus and the caret back, each keystroke would leave the cursor
+    nowhere and the second letter would be lost."""
+    source = APP_JS.read_text()
+    body = _function(source, "setSearch")
+    for step in ("render()", ".focus()", "setSelectionRange("):
+        assert step in body, f"setSearch no longer calls {step}"
+    assert body.index("render()") < body.index(".focus()") < body.index("setSelectionRange("), (
+        "the focus has to be restored after the rebuild, on the new box"
+    )
+
+    box = _function(source, "searchBox")
+    assert 'type: "search"' in box
+    assert "selectionStart" in box and "selectionEnd" in box
+    assert "searchBox()" in _function(source, "renderPortfolio")
+
+
+def test_escape_in_the_search_box_does_one_thing_at_a_time():
+    """Escape clears the search, and Escape closes the drawer. With text in
+    the box, the press is the search's and must not also reach the document
+    and close the drawer; with the box empty, it must reach the document, or
+    the drawer can no longer be closed from there."""
+    source = APP_JS.read_text()
+    box = _function(source, "searchBox")
+    keydown = re.search(r"onkeydown: \(e\) => \{(.*?)\n    \},", box, re.DOTALL)
+    assert keydown, "the search box has no Escape handling"
+    body = keydown.group(1)
+    assert '"Escape"' in body
+    assert "!e.target.value) return" in body, "an empty box must let Escape through"
+    assert body.index("return") < body.index("stopPropagation()")
+    assert 'e.key === "Escape" && closeDrawer()' in source, "the drawer's Escape is gone"
+
+
+def test_search_hides_initiatives_and_nothing_else():
+    """Reserves and the capacity rows belong to teams, not to an initiative.
+    Filtering them by an initiative's name would make the supply figures
+    change as you type, which reads as the plan changing."""
+    source = APP_JS.read_text()
+    portfolio = _function(source, "renderPortfolio")
+    visible = re.search(r"const visible = state\.initiatives\.filter\((.*?)\);", portfolio, re.DOTALL)
+    assert visible and "matchesSearch(i)" in visible.group(1)
+    reserves = re.search(r"const reserves = state\.reserves\.filter\((.*?)\);", portfolio, re.DOTALL)
+    assert reserves and "earch" not in reserves.group(1)
+    assert "No initiative matches" in portfolio
+
+    match = re.search(r"const matchesSearch = .*?;\n", source, re.DOTALL)
+    assert match and "reference" in match.group(0), "the reference is searched as well as the name"
+
+
+def test_glows_skip_clipped_edges_and_are_said_in_words():
+    """A bar that starts before the first month on screen has no start edge
+    to light, and a glow there would sit on the edge of the window instead.
+    And colour is never the only signal: the tooltip and the drawer say what
+    each glow says."""
+    source = APP_JS.read_text()
+    row = _function(source, "timelineRow")
+    assert "const startShown = offset >= 0;" in row
+    assert "const endShown = offset + span <= months.length;" in row
+    assert re.search(r"startShown && initiative\.earliest_start \? \"glow-start\"", row)
+    assert re.search(r"endShown && initiative\.end_limit === \"deadline\" \? \"glow-deadline\"", row)
+    assert re.search(r"endShown && initiative\.end_limit === \"capacity\" \? \"glow-capacity\"", row)
+
+    assert "edgeNotes(initiative)" in _function(source, "barTitle")
+    assert "edgeNotes(initiative)" in _function(source, "openShortfalls")
+
+    css = (APP_JS.parent / "app.css").read_text()
+    for glow in ("glow-start", "glow-capacity", "glow-deadline"):
+        assert f".{glow} {{" in css, f"no rule for .{glow}"
+        assert css.count(f"--{glow}:") == 2, f"--{glow} needs a light and a dark value"
+
+
+def test_a_bar_tooltip_names_its_months():
+    """On a long list the month header is a long way up from a bar, so the
+    tooltip of any bar that is not red says where it sits: "A — Sep 2026 to
+    Feb 2027", or "A — Sep 2026" for one month. A red bar keeps its shortfall
+    teams, an archived one says so, and the glow sentences go on their own
+    lines rather than running on after a full stop."""
+    source = APP_JS.read_text()
+    span = re.search(r"const monthSpan = .*?;\n", source, re.DOTALL)
+    assert span, "monthSpan is missing"
+    assert "start === end ? monthLong(start)" in span.group(0), "one month is said once"
+    assert "${monthLong(start)} to ${monthLong(end)}" in span.group(0)
+
+    title = _function(source, "barTitle")
+    assert "monthSpan(initiative.start_month, initiative.end_month)" in title
+    assert "shortfalls in: ${teams.join" in title
+    assert "— archived" in title
+    assert '...edgeNotes(initiative)].join("\\n")' in title
+    assert "drag to move the start" not in title
+
+
+def test_a_drag_stops_at_the_deadline():
+    """The server refuses an end past the deadline, but a bar that follows the
+    pointer there first promises a drop that only bounces back with an error."""
+    source = APP_JS.read_text()
+    drag = _function(source, "startBarDrag")
+    assert re.search(r"const latest = initiative\.deadline_month", drag)
+    assert re.search(r"target = Math\.max\(0, Math\.min\([^;]*latest\)\)", drag)
+    assert "target > latest" in drag, "a bar with nowhere legal to go must not be sent"
+
+
+def test_the_deadline_tick_sits_under_its_bar():
+    """The tick is drawn at the end of the deadline month, which is exactly
+    where a bar on its deadline ends. Appended after the bar it would paint on
+    top and take the pointer, and a drag started on the bar's end would grab
+    the tick instead."""
+    source = APP_JS.read_text()
+    row = _function(source, "timelineRow")
+    assert "deadline-tick" in row
+    assert row.index("deadline-tick") < row.index("row.append(bar)")
+    assert "Deadline: ${monthLong(deadline)}" in row
+    assert "!initiative.archived" in row and 'initiative.status !== "past"' in row
+
+
+def test_the_rules_are_numbered_the_same_in_both_copies():
+    """The rules live in two places, the Rules tab and the README, phrased for
+    different readers on purpose. A rule added to one and not the other is the
+    mistake that arrangement invites."""
+    source = APP_JS.read_text()
+    readme = (APP_JS.parents[1] / "README.md").read_text()
+    in_app = re.findall(r'^  \["(R\d+)", ', source, re.MULTILINE)
+    in_readme = re.findall(r"^- \*\*(R\d+)\*\*", readme, re.MULTILINE)
+    assert in_app == [f"R{n}" for n in range(1, len(in_app) + 1)], in_app
+    assert in_app == in_readme, f"Rules tab has {in_app}, README has {in_readme}"
+
+
+def test_dark_theme_overrides_come_after_what_they_override():
+    """A dark block has the same specificity as the light rule it overrides,
+    so source order decides — and a dark block placed before its light rule
+    silently loses. That has shipped twice: the team tags, then the capacity
+    ramp, where dark mode kept pale backgrounds under light text."""
+    css = (APP_JS.parent / "app.css").read_text()
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
+    opener = "@media (prefers-color-scheme: dark) {"
+
+    blocks = []
+    for match in re.finditer(re.escape(opener), css):
+        depth, at = 1, match.end()
+        while depth:
+            depth += {"{": 1, "}": -1}.get(css[at], 0)
+            at += 1
+        blocks.append((match.start(), at, css[match.end() : at - 1]))
+    assert blocks, "no dark-theme blocks found"
+
+    def light_rule_before(selector, position):
+        for rule in re.finditer(r"([^{}]+)\{[^{}]*\}", css[:position]):
+            if any(start <= rule.start() < end for start, end, _ in blocks):
+                continue
+            if selector in (s.strip() for s in rule.group(1).split(",")):
+                return True
+        return False
+
+    for start, _, body in blocks:
+        for rule in re.finditer(r"([^{}]+)\{[^{}]*\}", body):
+            for selector in (s.strip() for s in rule.group(1).split(",")):
+                assert light_rule_before(selector, start), (
+                    f"dark override for {selector!r} comes before its light rule"
+                )
