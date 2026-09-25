@@ -409,6 +409,18 @@ def undo(conn) -> str | None:
 # --- reset -------------------------------------------------------------------
 
 
+def delete_all_initiatives(conn) -> None:
+    """Delete every initiative and its demand. Destructive.
+
+    Teams, supply and reserves stay: they describe the capacity a plan is laid
+    over, and are the slow part to set up. This clears the work for a fresh
+    import without re-entering the organisation.
+    """
+    conn.execute("DELETE FROM demand")
+    conn.execute("DELETE FROM initiative")
+    conn.commit()
+
+
 def reset_to_empty(conn) -> None:
     """Delete every team, reserve and initiative. Destructive.
 

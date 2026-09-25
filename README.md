@@ -209,10 +209,12 @@ so it does nothing rather than quietly undoing again.
   import needs.
 - **Rules** — the allocation rules, what each colour means, and the behaviour
   that surprises people.
-- **Settings** — the horizon, a current-month override for experimenting, and
-  two ways to start again: reset to the demo fixture, or reset to zero for an
-  empty plan to build from scratch. Neither touches the horizon or the clock
-  override, and both are undoable.
+- **Settings** — the horizon, a current-month override for experimenting, a
+  button that deletes every initiative but keeps the teams, supply and reserves
+  (for re-importing the work onto the same capacity), and two ways to start
+  again: reset to the demo fixture, or reset to zero for an empty plan to build
+  from scratch. None of them touches the horizon or the clock override, and all
+  are undoable.
 
 The month range in the header narrows all three data views at once. It only
 changes what you see: the plan is always worked out over the whole horizon, so

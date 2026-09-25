@@ -499,6 +499,36 @@ def test_undoing_a_reserve_edit_restores_the_lines(client):
     assert next(r for r in undone["reserves"] if r["name"] == "BAU")["lines"][str(soc["id"])] == before
 
 
+# --- delete all initiatives --------------------------------------------------
+
+
+def test_delete_all_initiatives_keeps_teams_supply_and_reserves(client):
+    before = client.get("/api/state").json()
+    assert before["initiatives"], "the fixture should have initiatives to delete"
+
+    state = client.delete("/api/initiatives").json()
+
+    assert state["initiatives"] == []
+    assert state["teams"] == before["teams"]
+    assert state["supply"] == before["supply"]
+    assert state["reserves"] == before["reserves"]
+
+
+def test_delete_all_initiatives_is_one_undo(client):
+    before = client.get("/api/state").json()
+    client.delete("/api/initiatives")
+    undone = client.post("/api/undo").json()
+    assert undone["undone"] == f"Deleted all {len(before['initiatives'])} initiatives."
+    assert by_name(undone).keys() == by_name(before).keys()
+
+
+def test_new_initiatives_rank_from_one_after_deleting_all(client):
+    client.delete("/api/initiatives")
+    csv = "InitiativeName,Reference,StartMonth,EndMonth,SOC\nFresh,F-1,2027-02,2027-03,0.5\n"
+    assert client.post("/api/import", json={"csv": csv}).status_code == 200
+    assert [i["rank"] for i in client.get("/api/state").json()["initiatives"]] == [1]
+
+
 # --- reset to zero -----------------------------------------------------------
 
 

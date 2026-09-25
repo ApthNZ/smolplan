@@ -587,6 +587,15 @@ def delete_initiative(initiative_id: int, conn=Depends(get_conn)):
     return build_state(conn)
 
 
+@app.delete("/api/initiatives")
+def delete_all_initiatives(conn=Depends(get_conn)):
+    """Clear the work but keep the capacity: teams, supply and reserves stay."""
+    count = conn.execute("SELECT COUNT(*) AS n FROM initiative").fetchone()["n"]
+    db.checkpoint(conn, f"Deleted all {count} initiative{'' if count == 1 else 's'}.")
+    db.delete_all_initiatives(conn)
+    return build_state(conn)
+
+
 class ReorderIn(BaseModel):
     ordered_ids: list[int]
 

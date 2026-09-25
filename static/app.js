@@ -2001,6 +2001,32 @@ function renderSettings() {
         "Save settings"
       )
     ),
+    el("h3", {}, "Clear the initiatives"),
+    el(
+      "p",
+      { class: "muted" },
+      "Deletes every initiative and its demand. Teams, supply and reserves stay " +
+        "exactly as they are, ready for a fresh import. Undoable with Ctrl+Z."
+    ),
+    el(
+      "div",
+      { class: "row" },
+      el(
+        "button",
+        {
+          class: "danger",
+          disabled: !state.initiatives.length,
+          onclick: () =>
+            confirm(
+              (state.initiatives.length === 1
+                ? "Delete the only initiative? "
+                : `Delete all ${state.initiatives.length} initiatives? `) +
+                "Teams, supply and reserves are kept."
+            ) && send("DELETE", "/api/initiatives"),
+        },
+        "Delete all initiatives"
+      )
+    ),
     el("h3", {}, "Start again"),
     el(
       "p",
