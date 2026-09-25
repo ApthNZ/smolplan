@@ -24,12 +24,21 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest Python this runs on, and the one the image ships. Behaviour
+        # that differs between them — the Unicode tables text cleaning reads,
+        # for one — would otherwise only ever be tested on the older.
+        python-version: ["3.10", "3.14"]
     steps:
-      - uses: actions/checkout@v7
+      # Actions are pinned to a commit, with the version as a comment for
+      # Dependabot to move forward. A tag can be re-pointed; a commit cannot.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.10"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies and run tests
         run: |
@@ -38,7 +47,6 @@ jobs:
           for f in requirements-dev.txt requirements-test.txt test-requirements.txt dev-requirements.txt; do
             [ -f "$f" ] && pip install -r "$f"
           done
-          pip install pytest pytest-asyncio
           if [ -f run_tests.py ]; then
             python run_tests.py
           elif [ -d tests ]; then
@@ -46,3 +54,22 @@ jobs:
           else
             echo "No test suite found — nothing to run."
           fi
+
+  image:
+    # The suite never builds the Dockerfile or reads the compose file, so a
+    # base-image bump would otherwise pass on tests that did not run it. This
+    # builds what the compose file runs, hardening included, and waits for the
+    # container's own healthcheck to go green.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build the image and wait for /health
+        run: |
+          # The compose file runs as uid 1000, which the runner is not.
+          mkdir -p data && chmod 777 data
+          if ! docker compose up -d --build --wait --wait-timeout 120; then
+            docker compose logs
+            exit 1
+          fi
+          docker compose down

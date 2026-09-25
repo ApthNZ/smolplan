@@ -21,10 +21,16 @@ from pydantic import BaseModel, Field
 
 import db
 import engine
+import guard
 import importer
+from clean import clean_line, clean_text
 
 MAX_FTE_H = 10000  # 100.00 FTE
 MAX_OFFSET = 119  # ten years of profile
+MAX_OWNER = 120
+# Notes ride in every /api/state response and in every one of the fifty undo
+# snapshots, so an unbounded field here was fifty copies of whatever was pasted.
+MAX_NOTES = 10_000
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -55,11 +61,34 @@ async def lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="smolplan", lifespan=lifespan)
+# No /docs, /redoc or /openapi.json. Nothing uses them, the Swagger page loads
+# its script from a CDN the CSP would refuse anyway, and a map of every route is
+# not something a page with no login needs to hand out.
+app = FastAPI(title="smolplan", lifespan=lifespan,
+              docs_url=None, redoc_url=None, openapi_url=None)
+
+# Host allowlist, cross-site write refusal and security headers. See guard.py.
+# A plan served to the rest of a network is reached by a name or an address the
+# defaults do not know, and SMOLPLAN_ALLOWED_HOSTS is where that is said.
+app.add_middleware(guard.Guard, hosts=guard.allowed_hosts("SMOLPLAN_ALLOWED_HOSTS"))
 
 
 def bad(message: str):
     raise HTTPException(status_code=400, detail=message)
+
+
+def missing(what: str):
+    raise HTTPException(status_code=404, detail=f"No such {what}.")
+
+
+def exists(conn, table: str, row_id: int) -> bool:
+    """Is there a row with this id? Checked before anything is written or
+    checkpointed, so an id that names nothing is a 404 rather than a
+    foreign-key 500, and costs no step of the undo history."""
+    if not db.is_possible_id(row_id):
+        return False
+    # `table` is a literal from the call sites, never from a request.
+    return conn.execute(f"SELECT 1 FROM {table} WHERE id = ?", (row_id,)).fetchone() is not None
 
 
 def today_month() -> str:
@@ -153,6 +182,15 @@ def validate_span(from_month: str, to_month: str) -> list[str]:
     if len(months) > 240:
         raise ValueError("That span is longer than twenty years.")
     return months
+
+
+def clean_name(raw: str, what: str) -> str:
+    """A name after cleaning, which is what has to be non-empty — "   " passed
+    a min_length of 1 and was then stored stripped to nothing."""
+    name = clean_line(raw)
+    if not name:
+        raise ValueError(f"{what} needs a name.")
+    return name
 
 
 def guarded(fn, *args):
@@ -341,30 +379,59 @@ class TeamIn(BaseModel):
     name: str = Field(min_length=1, max_length=60)
 
 
+def _team_clash(conn, name: str, except_id: int | None = None) -> str | None:
+    """The existing team this name would be confused with, if any.
+
+    Compared the way the importer matches a column heading to a team — case,
+    spacing and punctuation ignored — rather than as exact strings. With `SOC`
+    and `S.O.C` both in the plan, an import column headed `SOC` resolved to
+    whichever happened to be read last, and its demand went to the wrong team
+    without a word. A name that squashes to nothing (all punctuation or emoji)
+    is compared case-insensitively instead.
+    """
+    def ident(text: str) -> str:
+        return importer.squash(text) or importer.key(text)
+
+    wanted = ident(name)
+    for row in conn.execute("SELECT id, name FROM team"):
+        if row["id"] != except_id and ident(row["name"]) == wanted:
+            return row["name"]
+    return None
+
+
 @app.post("/api/teams")
 def create_team(payload: TeamIn, conn=Depends(get_conn)):
-    exists = conn.execute("SELECT 1 FROM team WHERE name = ?", (payload.name,)).fetchone()
-    if exists:
-        bad(f"There is already a team called {payload.name}.")
-    db.checkpoint(conn, f"Added the team {payload.name.strip()}.")
-    conn.execute("INSERT INTO team (name) VALUES (?)", (payload.name.strip(),))
-    conn.commit()
+    name = guarded(clean_name, payload.name, "A team")
+    clash = _team_clash(conn, name)
+    if clash:
+        bad(f"There is already a team called {clash}.")
+    db.checkpoint(conn, f"Added the team {name}.")
+    conn.execute("INSERT INTO team (name) VALUES (?)", (name,))
+    db.commit(conn)
     return build_state(conn)
 
 
 @app.patch("/api/teams/{team_id}")
 def rename_team(team_id: int, payload: TeamIn, conn=Depends(get_conn)):
-    db.checkpoint(conn, f"Renamed a team to {payload.name.strip()}.")
-    conn.execute("UPDATE team SET name = ? WHERE id = ?", (payload.name.strip(), team_id))
-    conn.commit()
+    if not exists(conn, "team", team_id):
+        missing("team")
+    name = guarded(clean_name, payload.name, "A team")
+    clash = _team_clash(conn, name, except_id=team_id)
+    if clash:
+        bad(f"There is already a team called {clash}.")
+    db.checkpoint(conn, f"Renamed {_team_name(conn, team_id)} to {name}.")
+    conn.execute("UPDATE team SET name = ? WHERE id = ?", (name, team_id))
+    db.commit(conn)
     return build_state(conn)
 
 
 @app.delete("/api/teams/{team_id}")
 def delete_team(team_id: int, conn=Depends(get_conn)):
+    if not exists(conn, "team", team_id):
+        missing("team")
     db.checkpoint(conn, f"Deleted the team {_team_name(conn, team_id)}.")
     conn.execute("DELETE FROM team WHERE id = ?", (team_id,))
-    conn.commit()
+    db.commit(conn)
     return build_state(conn)
 
 
@@ -383,6 +450,8 @@ def fill_supply(payload: FillIn, conn=Depends(get_conn)):
     months = guarded(validate_span, payload.from_month, payload.to_month)
     if payload.fte_h is not None:
         guarded(validate_fte, payload.fte_h)
+    if not exists(conn, "team", payload.team_id):
+        missing("team")
     db.checkpoint(conn, _fill_label("supply", conn, payload, months))
     for month in months:
         if payload.fte_h is None:
@@ -395,7 +464,7 @@ def fill_supply(payload: FillIn, conn=Depends(get_conn)):
                 "ON CONFLICT(team_id, month) DO UPDATE SET fte_h = excluded.fte_h",
                 (payload.team_id, month, payload.fte_h),
             )
-    conn.commit()
+    db.commit(conn)
     return build_state(conn)
 
 
@@ -405,22 +474,25 @@ class ReserveIn(BaseModel):
 
 @app.post("/api/reserves")
 def create_reserve(payload: ReserveIn, conn=Depends(get_conn)):
-    db.checkpoint(conn, f"Added the reserve {payload.name.strip()}.")
+    name = guarded(clean_name, payload.name, "A reserve")
+    db.checkpoint(conn, f"Added the reserve {name}.")
     order = conn.execute(
         "SELECT COALESCE(MAX(sort_order), 0) + 1 AS n FROM reserve"
     ).fetchone()["n"]
     conn.execute(
-        "INSERT INTO reserve (name, sort_order) VALUES (?, ?)", (payload.name.strip(), order)
+        "INSERT INTO reserve (name, sort_order) VALUES (?, ?)", (name, order)
     )
-    conn.commit()
+    db.commit(conn)
     return build_state(conn)
 
 
 @app.delete("/api/reserves/{reserve_id}")
 def delete_reserve(reserve_id: int, conn=Depends(get_conn)):
+    if not exists(conn, "reserve", reserve_id):
+        missing("reserve")
     db.checkpoint(conn, f"Deleted the reserve {_reserve_name(conn, reserve_id)}.")
     conn.execute("DELETE FROM reserve WHERE id = ?", (reserve_id,))
-    conn.commit()
+    db.commit(conn)
     return build_state(conn)
 
 
@@ -429,6 +501,10 @@ def fill_reserve(reserve_id: int, payload: FillIn, conn=Depends(get_conn)):
     months = guarded(validate_span, payload.from_month, payload.to_month)
     if payload.fte_h:
         guarded(validate_fte, payload.fte_h)
+    if not exists(conn, "reserve", reserve_id):
+        missing("reserve")
+    if not exists(conn, "team", payload.team_id):
+        missing("team")
     db.checkpoint(
         conn, _fill_label(_reserve_name(conn, reserve_id), conn, payload, months)
     )
@@ -445,7 +521,7 @@ def fill_reserve(reserve_id: int, payload: FillIn, conn=Depends(get_conn)):
                 "DO UPDATE SET fte_h = excluded.fte_h",
                 (reserve_id, payload.team_id, month, payload.fte_h),
             )
-    conn.commit()
+    db.commit(conn)
     return build_state(conn)
 
 
@@ -457,8 +533,8 @@ class InitiativeIn(BaseModel):
     start_month: str
     end_month: str | None = None  # absent: the start month, so one month long
     deadline_month: str | None = None  # absent, null or blank: no deadline
-    owner: str = ""
-    notes: str = ""
+    owner: str = Field(default="", max_length=MAX_OWNER)
+    notes: str = Field(default="", max_length=MAX_NOTES)
 
 
 class InitiativePatch(BaseModel):
@@ -466,54 +542,66 @@ class InitiativePatch(BaseModel):
     start_month: str | None = None
     end_month: str | None = None
     deadline_month: str | None = None  # null or blank clears it
-    owner: str | None = None
-    notes: str | None = None
+    owner: str | None = Field(default=None, max_length=MAX_OWNER)
+    notes: str | None = Field(default=None, max_length=MAX_NOTES)
     archived: bool | None = None
 
 
 @app.post("/api/initiatives")
 def create_initiative(payload: InitiativeIn, conn=Depends(get_conn)):
+    """Returns the new initiative's id as `created_id` beside the state, so the
+    editor can send its demand to the row it made — not to the highest id in
+    the plan, which with a second tab open may be someone else's."""
+    name = guarded(clean_name, payload.name, "An initiative")
     current = current_month(conn)
     guarded(validate_start_month, payload.start_month, current)
     duration = 1
     if payload.end_month is not None:
         duration = guarded(validate_end_month, payload.start_month, payload.end_month)
     deadline = guarded(validate_deadline_month, payload.deadline_month)
-    guarded(validate_deadline, payload.name.strip(), payload.start_month, duration, deadline)
+    guarded(validate_deadline, name, payload.start_month, duration, deadline)
 
-    db.checkpoint(conn, f"Created {payload.name.strip()}.")
+    db.checkpoint(conn, f"Created {name}.")
     stamp = db.now()
-    conn.execute(
+    created_id = conn.execute(
         'INSERT INTO initiative (name, "rank", start_month, duration_m, deadline_month, '
         "owner, notes, archived, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
         (
-            payload.name.strip(),
+            name,
             db.next_rank(conn),
             payload.start_month,
             duration,
             deadline,
-            payload.owner.strip(),
-            payload.notes.strip(),
+            clean_line(payload.owner),
+            clean_text(payload.notes),
             stamp,
             stamp,
         ),
-    )
-    conn.commit()
-    return build_state(conn)
+    ).lastrowid
+    db.commit(conn)
+    return {**build_state(conn), "created_id": created_id}
 
 
 @app.patch("/api/initiatives/{initiative_id}")
 def update_initiative(initiative_id: int, payload: InitiativePatch, conn=Depends(get_conn)):
+    if not exists(conn, "initiative", initiative_id):
+        missing("initiative")
     row = conn.execute(
         "SELECT name, start_month, duration_m, deadline_month, archived "
         "FROM initiative WHERE id = ?",
         (initiative_id,),
     ).fetchone()
-    if row is None:
-        raise HTTPException(status_code=404, detail="No such initiative.")
 
     current = current_month(conn)
     fields = payload.model_dump(exclude_unset=True)
+    # Cleaned once, here, so the label, the deadline message and the stored
+    # value all see the same text. A null for a text field means "leave it".
+    for key, clean in (("name", None), ("owner", clean_line), ("notes", clean_text)):
+        if key in fields and fields[key] is None:
+            del fields[key]
+        elif key in fields:
+            fields[key] = (guarded(clean_name, fields[key], "An initiative") if clean is None
+                           else clean(fields[key]))
 
     if "start_month" in fields and fields["start_month"] != row["start_month"]:
         # R8: a start cannot be moved into the past. Whether the initiative has
@@ -535,7 +623,7 @@ def update_initiative(initiative_id: int, payload: InitiativePatch, conn=Depends
     # R11, on whatever combination arrived: a drag, a new end, or a deadline
     # brought in past the end are all the same breach.
     if fields.keys() & {"start_month", "end_month", "deadline_month"}:
-        name = (fields.get("name") or row["name"]).strip()
+        name = fields.get("name") or row["name"]
         guarded(validate_deadline, name, start, duration, deadline)
 
     db.checkpoint(conn, _patch_label(row, fields))
@@ -570,12 +658,14 @@ def update_initiative(initiative_id: int, payload: InitiativePatch, conn=Depends
     conn.execute(
         "UPDATE initiative SET updated_at = ? WHERE id = ?", (db.now(), initiative_id)
     )
-    conn.commit()
+    db.commit(conn)
     return build_state(conn)
 
 
 @app.delete("/api/initiatives/{initiative_id}")
 def delete_initiative(initiative_id: int, conn=Depends(get_conn)):
+    if not exists(conn, "initiative", initiative_id):
+        missing("initiative")
     db.checkpoint(conn, f"Deleted {_initiative_name(conn, initiative_id)}.")
     conn.execute("DELETE FROM initiative WHERE id = ?", (initiative_id,))
     remaining = [
@@ -583,7 +673,7 @@ def delete_initiative(initiative_id: int, conn=Depends(get_conn)):
         for r in conn.execute('SELECT id FROM initiative ORDER BY "rank"').fetchall()
     ]
     db.renumber_ranks(conn, remaining)
-    conn.commit()
+    db.commit(conn)
     return build_state(conn)
 
 
@@ -593,6 +683,7 @@ def delete_all_initiatives(conn=Depends(get_conn)):
     count = conn.execute("SELECT COUNT(*) AS n FROM initiative").fetchone()["n"]
     db.checkpoint(conn, f"Deleted all {count} initiative{'' if count == 1 else 's'}.")
     db.delete_all_initiatives(conn)
+    db.commit(conn)
     return build_state(conn)
 
 
@@ -603,11 +694,12 @@ class ReorderIn(BaseModel):
 @app.post("/api/initiatives/reorder")
 def reorder(payload: ReorderIn, conn=Depends(get_conn)):
     known = {r["id"] for r in conn.execute("SELECT id FROM initiative").fetchall()}
-    if set(payload.ordered_ids) != known:
+    # The length too: [1, 1, 2, 3] is the right set, and ranked 2, 3, 4.
+    if set(payload.ordered_ids) != known or len(payload.ordered_ids) != len(known):
         bad("The reorder must list every initiative exactly once.")
     db.checkpoint(conn, _reorder_label(conn, payload.ordered_ids))
     db.renumber_ranks(conn, payload.ordered_ids)
-    conn.commit()
+    db.commit(conn)
     return build_state(conn)
 
 
@@ -635,14 +727,17 @@ def replace_demand(
     end is refused rather than trimmed: the end is set on its own, and a grid
     that reaches past it means the two disagree about how long this runs.
     """
+    if not exists(conn, "initiative", initiative_id):
+        missing("initiative")
     row = conn.execute(
         "SELECT start_month, duration_m FROM initiative WHERE id = ?", (initiative_id,)
     ).fetchone()
-    if row is None:
-        raise HTTPException(status_code=404, detail="No such initiative.")
 
+    teams = {r["id"] for r in conn.execute("SELECT id FROM team")}
     seen = set()
     for line in payload.lines:
+        if line.team_id not in teams:
+            bad(f"There is no team with id {line.team_id}.")
         guarded(validate_fte, line.fte_h)
         if line.offset < 0 or line.offset > MAX_OFFSET:
             bad(f"Offset must be between 0 and {MAX_OFFSET}.")
@@ -669,7 +764,7 @@ def replace_demand(
     conn.execute(
         "UPDATE initiative SET updated_at = ? WHERE id = ?", (db.now(), initiative_id)
     )
-    conn.commit()
+    db.commit(conn)
     return build_state(conn)
 
 
@@ -707,7 +802,7 @@ def update_settings(payload: SettingsIn, conn=Depends(get_conn)):
         if payload.current_month:
             guarded(validate_month, payload.current_month)
         db.set_setting(conn, "current_month", payload.current_month)
-    conn.commit()
+    db.commit(conn)
     return build_state(conn)
 
 
@@ -853,7 +948,7 @@ def import_csv(payload: ImportIn, conn=Depends(get_conn)):
                         "VALUES (?, ?, ?, ?)",
                         (initiative_id, team_id, offset, fte_h),
                     )
-        conn.commit()
+        db.commit(conn)
     except Exception:
         conn.rollback()
         raise
@@ -895,6 +990,7 @@ def convert_summary(payload: ConvertIn, conn=Depends(get_conn)):
 def reseed(conn=Depends(get_conn)):
     db.checkpoint(conn, "Reset to the fixture.")
     db.seed_fixture(conn)
+    db.commit(conn)
     return build_state(conn)
 
 
@@ -907,6 +1003,7 @@ def reset(conn=Depends(get_conn)):
     """
     db.checkpoint(conn, "Reset to an empty plan.")
     db.reset_to_empty(conn)
+    db.commit(conn)
     return build_state(conn)
 
 

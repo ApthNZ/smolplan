@@ -1057,7 +1057,12 @@ def test_an_editor_save_is_named_by_what_actually_changed(client):
         "name": "B", "owner": "", "notes": "",
         "start_month": b["start_month"], "end_month": b["end_month"], "deadline_month": None,
     }
+    depth = client.get("/api/state").json()["undo"]["depth"]
     client.patch(f"/api/initiatives/{b['id']}", json=everything)
+    # A Save that changed nothing takes no step of the history at all.
+    assert client.get("/api/state").json()["undo"]["depth"] == depth
+
+    client.patch(f"/api/initiatives/{b['id']}", json={**everything, "owner": "Ana"})
     assert undo_label(client) == "Edited B."
 
     client.patch(f"/api/initiatives/{b['id']}", json={**everything, "deadline_month": "2027-06"})

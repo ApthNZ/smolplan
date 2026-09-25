@@ -270,8 +270,28 @@ def test_slashed_dates_are_read_day_first():
 
 
 def test_a_second_number_above_twelve_is_read_month_first():
-    """Only one reading of 2/31/2027 is a date at all."""
-    assert importer.month_of("2/31/2027") == "2027-02"
+    """Only one reading of 2/28/2027 is a date at all."""
+    assert importer.month_of("2/28/2027") == "2027-02"
+
+
+@pytest.mark.parametrize("impossible", ["31/02/2026", "2026-02-31", "2/31/2027", "29/02/2027",
+                                        "31/04/2027 0:00", "31/Apr/27 12:00 AM", "0/01/2027"])
+def test_a_day_the_month_does_not_have_is_not_a_date(impossible):
+    """The day is dropped, but it still has to exist: 31/02 is a typo, and
+    reading it as February would import the typo as a plan."""
+    assert importer.month_of(impossible) == impossible
+
+
+def test_a_leap_day_is_a_date():
+    assert importer.month_of("29/02/2028") == "2028-02"
+
+
+@pytest.mark.parametrize("year", ["0000-01", "1999-12", "2100-01", "9999-12"])
+def test_a_year_outside_the_plan_range_is_refused(client, year):
+    """`\\d{4}` let an import store year 0000."""
+    response = post(client, HEADER + f"\nOld,PRO-1,{year},{year},1,\n")
+    assert response.status_code == 400
+    assert "is not a month" in " ".join(response.json()["detail"]["errors"])
 
 
 def test_a_file_of_full_dates_imports(client):

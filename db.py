@@ -93,6 +93,22 @@ UNDO_DEPTH = 50
 # it is walking back through.
 UNDO_TABLES = ("setting", "team", "supply", "reserve", "reserve_line", "initiative", "demand")
 
+# Columns that record *when*, not *what*. A write that changed only these
+# changed nothing anyone could see, so a checkpoint for it is not kept.
+STAMP_COLUMNS = frozenset({"created_at", "updated_at"})
+
+# SQLite stores integers in 64 bits. A larger id cannot name a row, and handing
+# one to the driver raises OverflowError rather than simply not matching —
+# which turns "no such initiative" into a 500. The same guard as smoltask's.
+INT_MAX = 2**63 - 1
+INT_MIN = -(2**63)
+
+
+def is_possible_id(row_id) -> bool:
+    """Could this value name a row at all?"""
+    return isinstance(row_id, int) and not isinstance(row_id, bool) \
+        and INT_MIN <= row_id <= INT_MAX
+
 
 def connect(path: str | None = None) -> sqlite3.Connection:
     # check_same_thread=False: a connection is opened per request and handed
@@ -365,6 +381,39 @@ def checkpoint(conn, label: str, amend: bool = False) -> None:
         "(SELECT id FROM undo_snapshot ORDER BY id DESC LIMIT ?)",
         (UNDO_DEPTH,),
     )
+
+
+def _content(data: dict) -> dict:
+    """A snapshot with its timestamps removed and its rows in a fixed order —
+    what the plan says, rather than when each part of it was written."""
+    content = {}
+    for table, block in data.items():
+        keep = [i for i, c in enumerate(block["columns"]) if c not in STAMP_COLUMNS]
+        content[table] = sorted(([row[i] for i in keep] for row in block["rows"]), key=repr)
+    return content
+
+
+def commit(conn) -> None:
+    """Commit a write, first dropping the checkpoint on top of the stack if the
+    plan now reads exactly as that checkpoint does.
+
+    Such a checkpoint would spend a Ctrl+Z undoing nothing, and — the part that
+    matters — it pushes a real one off the bottom of a stack fifty deep. A
+    settings save that changed no setting, a fill that wrote the values already
+    there and a re-seed of an unchanged fixture all did that. Handlers call this
+    in place of `conn.commit()`; it costs one more snapshot per write, which for
+    a plan this size is nothing.
+
+    It compares against the top of the stack whoever pushed it, which is right
+    either way: if the plan is back to how it was before the last checkpoint,
+    undoing to that checkpoint changes nothing.
+    """
+    top = conn.execute(
+        "SELECT id, payload FROM undo_snapshot ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if top is not None and _content(json.loads(top["payload"])) == _content(snapshot(conn)):
+        conn.execute("DELETE FROM undo_snapshot WHERE id = ?", (top["id"],))
+    conn.commit()
 
 
 def undo_state(conn) -> dict:

@@ -29,8 +29,10 @@ from __future__ import annotations
 import csv
 import io
 import re
+from datetime import date
 from decimal import Decimal, InvalidOperation
 
+from clean import clean_line
 from engine import MONTH_RE, month_index, month_span
 
 NAME = "initiativename"
@@ -84,7 +86,8 @@ def month_of(value: str | None) -> str:
 
     The day and the time in a full date say nothing a plan cares about, so they
     are dropped rather than rejected — 1/07/2026 and 31/07/2026 are both
-    2026-07. Anything that is not a date is returned unchanged, for the caller
+    2026-07. The day must still be one the month has: 31/02/2026 is a typo, not
+    February. Anything that is not a date is returned unchanged, for the caller
     to reject with the text the file actually contained.
 
     Slashed dates are read day-first, the form the spreadsheets feeding this
@@ -111,7 +114,9 @@ def month_of(value: str | None) -> str:
         if month > 12 and day <= 12:
             day, month = month, day
 
-    if not (1 <= month <= 12 and 1 <= day <= 31):
+    try:
+        date(year, month, day)
+    except ValueError:
         return value
     return f"{year:04d}-{month:02d}"
 
@@ -155,6 +160,11 @@ def parse(text: str, teams: list[dict]) -> tuple[list[dict], list[str]]:
     column leaves the deadline as it was, a blank cell clears it.
     """
     by_name = {key(t["name"]): t for t in teams}
+    # Two teams whose names differ only in case cannot both be told apart by a
+    # column heading. The API no longer lets that happen; a plan from before it
+    # may still hold such a pair, and then the heading is refused rather than
+    # handed to whichever of them happened to be read last.
+    ambiguous = {k for k in by_name if sum(key(t["name"]) == k for t in teams) > 1}
     known = ", ".join(sorted(t["name"] for t in teams)) or "none — add a team first"
 
     # utf-8-sig: exports from Jira and Excel routinely carry a byte-order mark,
@@ -227,6 +237,12 @@ def parse(text: str, teams: list[dict]) -> tuple[list[dict], list[str]]:
             )
 
         team_columns = [(i, h) for i, h in enumerate(headers) if h.lower() not in RESERVED and h]
+        unclear = [h for _, h in team_columns if key(h) in ambiguous]
+        if unclear:
+            errors.append(
+                f"Column{'s' if len(unclear) > 1 else ''} {', '.join(unclear)} could mean more "
+                "than one team. Rename one of the teams so their names differ by more than case."
+            )
         unknown = [h for _, h in team_columns if key(h) not in by_name]
         if unknown:
             errors.append(
@@ -263,8 +279,11 @@ def parse(text: str, teams: list[dict]) -> tuple[list[dict], list[str]]:
         def cell(position: int) -> str:
             return normalise(raw[position]) if position < len(raw) else ""
 
-        name = cell(index[NAME])
-        reference = cell(index[REFERENCE])
+        # clean_line, not just strip: a name or reference from a file is stored
+        # and exported like one typed in, so it loses the same controls. Only
+        # these two — the Team Capacity cell's line breaks are its structure.
+        name = clean_line(cell(index[NAME]))
+        reference = clean_line(cell(index[REFERENCE]))
         start = month_of(cell(index[START]))
         end = month_of(cell(index[END]))
 
@@ -427,6 +446,11 @@ def parse_capacity(text: str, teams: list[dict]) -> tuple[dict[int, int], list[s
     """
     by_exact = {key(t["name"]): t for t in teams}
     by_squash = {squash(t["name"]): t for t in teams}
+    # As in parse(): a name that could be either of two teams matches neither,
+    # and is reported as unknown rather than guessed at.
+    for table, ident in ((by_exact, key), (by_squash, squash)):
+        for shared in [k for k in table if sum(ident(t["name"]) == k for t in teams) > 1]:
+            del table[shared]
 
     def team_named(name: str) -> dict | None:
         return by_exact.get(key(name)) or by_squash.get(squash(name))

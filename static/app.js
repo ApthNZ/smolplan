@@ -1172,6 +1172,7 @@ function openEditor(initiative) {
     redraw();
   });
 
+  let createdId = null;
   async function save() {
     // Values in columns an earlier end cut off are still in `grid`, so only the
     // columns on screen are sent. The server refuses demand past the end anyway;
@@ -1184,8 +1185,12 @@ function openEditor(initiative) {
       .filter((line) => line.offset < columns);
     const dates = { start_month: start, end_month: end(), deadline_month: deadline };
     try {
-      let id = initiative && initiative.id;
-      if (isNew) {
+      // A new initiative is created once. If the create lands and the demand
+      // after it fails, the retry patches the row it already made rather than
+      // making a second one — and the id is the one the server says it made,
+      // not the highest in the plan, which a second tab may have just added.
+      let id = initiative ? initiative.id : createdId;
+      if (id === null) {
         const created = await api("POST", "/api/initiatives", {
           name: nameInput.value.trim() || "Untitled",
           ...dates,
@@ -1193,7 +1198,7 @@ function openEditor(initiative) {
           notes: notesInput.value,
         });
         setState(created);
-        id = Math.max(...state.initiatives.map((i) => i.id));
+        id = createdId = created.created_id;
       } else {
         const patch = {
           name: nameInput.value.trim() || data.name,

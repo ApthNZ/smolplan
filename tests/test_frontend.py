@@ -507,3 +507,34 @@ def test_dark_theme_overrides_come_after_what_they_override():
                 assert light_rule_before(selector, start), (
                     f"dark override for {selector!r} comes before its light rule"
                 )
+
+
+def test_the_editor_uses_the_id_the_server_made():
+    """The new initiative's id was taken as the highest id in the plan. With a
+    second tab open, that can be someone else's new initiative, and the demand
+    grid was written to it."""
+    source = APP_JS.read_text()
+    save = source[source.index("async function save()"):]
+    save = save[:save.index("\n  }\n")]
+    assert "created.created_id" in save
+    assert "Math.max" not in save
+
+
+def test_a_retried_save_does_not_create_twice():
+    """If the create lands and the demand after it fails, the retry must patch
+    the row already made, not make a second."""
+    source = APP_JS.read_text()
+    assert "let createdId = null;" in source
+    assert "initiative ? initiative.id : createdId" in source
+
+
+def test_styles_are_set_through_the_cssom_not_as_attributes():
+    """The CSP refuses inline style attributes. `el()` routes `style` through
+    `node.style.cssText`, which a CSP does not govern; anything that sets the
+    attribute directly would render unstyled with only a console warning."""
+    source = APP_JS.read_text()
+    assert 'key === "style") node.style.cssText = value' in source
+    assert not re.search(r"setAttribute\(\s*[\"']style", source)
+    assert "<script>" not in (APP_JS.parent / "index.html").read_text()
+    assert not re.search(r"\son\w+=", (APP_JS.parent / "index.html").read_text()), \
+        "inline handlers are inline script"

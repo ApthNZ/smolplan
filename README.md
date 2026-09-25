@@ -47,8 +47,14 @@ Or with Docker:
 docker compose up -d --build    # http://127.0.0.1:8107
 ```
 
-The compose file publishes port 8107 by default; set `SMOLPLAN_PORT` to change
-it. On a Windows laptop, see [docs/windows.md](docs/windows.md).
+The compose file publishes port 8107 by default, on `127.0.0.1` only; set
+`SMOLPLAN_PORT` to change the port. To serve the plan to the rest of your
+network, set `SMOLPLAN_BIND=0.0.0.0` in `.env` **and** list the name you will
+browse to in `SMOLPLAN_ALLOWED_HOSTS` — the app refuses any Host header it was
+not told about, which is its defence against DNS rebinding. Set `TZ` there too:
+"this month" is the server's month. `.env.example` and the comments in
+`docker-compose.yml` have the details. On a Windows laptop, see
+[docs/windows.md](docs/windows.md).
 
 The database is created on first run and seeded with a demo anchored on the
 current month: teams SOC and GRC, initiatives A, B and C, and B short of GRC
@@ -351,7 +357,7 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-284 tests in five suites:
+469 tests in seven suites:
 
 - `tests/test_engine.py` — the specification's acceptance tests, T1 to T7,
   against the pure engine: baseline, drag-to-fit, fit hints, a displacement
@@ -364,7 +370,13 @@ pytest -q
   column, all-or-nothing failure, Jira exports and the formats their Team
   Capacity field arrives in, and the demand-summary converter.
 - `tests/test_security.py` — injection through every field the API accepts,
-  path traversal, and input validation. See [SECURITY.md](SECURITY.md).
+  path traversal, input validation, the host allowlist, cross-site write
+  refusal and the security headers. See [SECURITY.md](SECURITY.md).
+- `tests/test_robustness.py` — hostile input on every route, none of which may
+  return a 5xx, and requests that change nothing, none of which may take a
+  step of the undo history.
+- `tests/test_config.py` — the compose file, the Dockerfile and the CI
+  workflows, which the rest of the suite never runs.
 - `tests/test_frontend.py` — static guards on `static/app.js`, pinning the
   mistakes that have actually been made so they cannot be made again.
 

@@ -1,20 +1,53 @@
 # There is no authentication in front of this. Anything that can reach the
 # published port can edit the plan, which is fine for a single-user toy on a
-# trusted network and would not be fine for anything else. See SECURITY.md.
+# trusted network and would not be fine for anything else.
+# See SECURITY.md.
 #
-# The published port defaults to 8107; set SMOLPLAN_PORT to change it. To keep
-# it to this machine only, use "127.0.0.1:${SMOLPLAN_PORT:-8107}:8000".
+# By default the port is published on 127.0.0.1 only, so the app is reachable
+# from this machine and nowhere else. To serve it to the rest of your network,
+# set in .env:
+#
+#     SMOLPLAN_BIND=0.0.0.0
+#     SMOLPLAN_ALLOWED_HOSTS=localhost,127.0.0.1,<the name or address you browse to>
+#
+# The second line matters as much as the first. The app refuses any request
+# whose Host header it was not told about (that is its defence against DNS
+# rebinding), so a LAN address that is not listed gets "Invalid host header".
+#
+# Do not count on a host firewall to narrow a 0.0.0.0 binding: Docker writes
+# its own iptables rules for published ports, ahead of ufw's and firewalld's,
+# so a port published here is open whatever those say.
+#
+# The port defaults to 8107; set SMOLPLAN_PORT to change it.
 services:
   smolplan:
     build: .
     container_name: smolplan
     ports:
-      - "${SMOLPLAN_PORT:-8107}:8000"
+      - "${SMOLPLAN_BIND:-127.0.0.1}:${SMOLPLAN_PORT:-8107}:8000"
     # The image's own user is uid 10001, but the SQLite file lives on a bind
     # mount owned by the host user, so run as that user rather than chowning a
     # host directory. Change to match your own uid:gid, or drop the line and
     # chown ./data to 10001 instead.
     user: "1000:1000"
+    # Nothing in the container writes anywhere but /data, and uvicorn needs no
+    # Linux capability to listen on 8000, so the root filesystem is read-only,
+    # every capability is dropped, and nothing can gain privileges by exec.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      # "This month" is the server's month. A container with no TZ runs in UTC,
+      # and east of Greenwich that is last month for the first hours of every
+      # month — when R7 and R8, which are about the current month, are judged
+      # against the wrong one. Set TZ in .env to where the plan's owner lives.
+      TZ: ${TZ:-UTC}
+      # Blank means the defaults: localhost, 127.0.0.1 and [::1]. See the top.
+      SMOLPLAN_ALLOWED_HOSTS: ${SMOLPLAN_ALLOWED_HOSTS:-}
     volumes:
       - ./data:/data
     restart: unless-stopped

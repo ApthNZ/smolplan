@@ -118,11 +118,18 @@ By default the server listens only on `127.0.0.1`, so nothing else on the
 network can reach it. That is the right default: **smolplan has no login of any
 kind**, so anyone who can open the page can edit the plan.
 
-If you do want it on your home network:
+If you do want it on your home network, tell the app the name other devices
+will use for it as well as opening the port:
 
 ```powershell
+$env:SMOLPLAN_ALLOWED_HOSTS = "localhost,127.0.0.1,<your-laptop-name-or-ip>"
 .\.venv\Scripts\python.exe -m uvicorn app:app --host 0.0.0.0 --port 8000
 ```
+
+Without the first line, other devices get **Invalid host header**. The app
+answers only to names it has been told about, which is what stops a web page
+you visit from re-pointing its own domain at your laptop and reading the app
+through your browser.
 
 Windows Defender Firewall will prompt the first time — allow it on **private**
 networks only, never public. Other devices then use `http://<your-laptop-ip>:8000`;
@@ -178,11 +185,16 @@ docker compose up -d --build
 Then <http://127.0.0.1:8107> — the compose file publishes **8107** by default,
 not 8000. Set `SMOLPLAN_PORT` to change it.
 
-Two things differ from the Python route:
+Three things differ from the Python route:
 
-- It publishes on all interfaces, so the whole network can reach it. Given
-  there is no login, change the ports line to `"127.0.0.1:8107:8000"` if you
-  want it kept to the laptop.
+- **Set `TZ` yourself.** A container with no timezone runs in UTC, and "this
+  month" is the server's month, so for the first hours of every month an unset
+  `TZ` east of Greenwich plans from last month. Create a `.env` file next to
+  `docker-compose.yml` with the IANA name for where you live — `TZ=Europe/London`,
+  `TZ=Pacific/Auckland` — not the Windows label like *GMT Standard Time*.
+- It publishes on `127.0.0.1` only, so it is kept to the laptop. To share it,
+  add `SMOLPLAN_BIND=0.0.0.0` and `SMOLPLAN_ALLOWED_HOSTS=localhost,127.0.0.1,<your-laptop-name-or-ip>`
+  to the same `.env`. The comments at the top of the compose file explain both.
 - The container is pinned to uid 1000, which matters on Linux and means nothing
   on Windows. It keeps the database on a bind mount at `.\data`; if Docker
   Desktop reports a permissions error writing `/data`, delete the

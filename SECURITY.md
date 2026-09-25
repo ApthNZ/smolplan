@@ -30,5 +30,8 @@ Details, including the accepted risks, are in
 [SECURITY_STATUS.md](SECURITY_STATUS.md). In summary: every SQL query is
 parameterised, writes go through an explicit column allowlist, all input is
 validated (month format, FTE bounds, offset bounds, span length), and static
-files are served by a mount that confines paths. `tests/test_security.py`
-covers each of those.
+files are served by a mount that confines paths. The app also refuses requests
+that name a host it was not told about (DNS rebinding) and writes that a
+browser marks as coming from another site (CSRF), and sends a strict
+Content-Security-Policy that forbids framing. `tests/test_security.py` covers
+each of those.

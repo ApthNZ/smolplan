@@ -13,7 +13,9 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 
-MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+# Years 2000-2099. A plan has no business in year 0000, which the old `\d{4}`
+# let an import store, and a bound keeps month arithmetic inside real dates.
+MONTH_RE = re.compile(r"^20\d{2}-(0[1-9]|1[0-2])$")
 
 GREEN = "green"
 RED = "red"
