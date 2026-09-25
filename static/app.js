@@ -1842,6 +1842,7 @@ function importPanel() {
       el("li", {}, "A blank team cell means that team is not needed. Column order and capitalisation do not matter."),
       el("li", {}, "StartMonth and EndMonth are YYYY-MM, but a full date is accepted too \u2014 1/07/2026 0:00 is read as 2026-07. Slashed dates are read day-first."),
       el("li", {}, "An optional Deadline column, in the same format, sets each row\u2019s deadline \u2014 so no team can be called Deadline. A blank cell means no deadline, and clears one already set. Leave the column out and the deadlines already in the plan are kept. Either way, an EndMonth after the deadline is refused (R11)."),
+      el("li", {}, "A Jira CSV export imports as it is. Summary, Issue key, Target start and Target end stand in for the first four columns, and each team\u2019s FTE is read from the \u201cTeam: FTE\u201d lines of its Team Capacity field. Every other column, and every other line of that field, is ignored. A team this plan does not have is refused only if it is given FTE \u2014 at 0 it is skipped."),
       el("li", {}, "A start in the past is accepted — only the remaining months are evaluated."),
       el("li", {}, "New rows are added below everything already in the plan. Nothing is ever deleted or re-ranked."),
       el("li", {}, "If anything is wrong, the whole file is rejected and you get every problem at once.")),

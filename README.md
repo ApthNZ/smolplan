@@ -111,6 +111,56 @@ start, an end past a deadline, a duplicated reference — the whole file is
 rejected, nothing is written, and you get every problem at once rather than one
 per attempt.
 
+### Importing a Jira export
+
+A Jira CSV export can be imported as it comes out of Jira. It is recognised by
+its **Team Capacity** field, and then read on Jira's terms:
+
+| Jira field | Read as |
+|------------|---------|
+| `Summary` | `InitiativeName` |
+| `Issue key` | `Reference` |
+| `Target start` | `StartMonth` |
+| `Target end` | `EndMonth` |
+| `Team Capacity` | the team columns |
+| `Deadline`, if there is one | `Deadline` |
+
+Custom fields may arrive wrapped, as `Custom field (Target start)`; both forms
+are accepted. **Every other column is ignored** — Jira exports dozens, some of
+them repeated, and none of them is a team.
+
+Team Capacity is free text typed by hand, so no two issues write it quite the
+same way. The import looks for `Team: FTE` entries in it and treats everything
+else as prose:
+
+```
+Teams required to resource: Networks / Platform     <- prose, ignored
+Estimated Team FTE:                                 <- a heading, ignored
+SOC: 0.5
+GRC: 0
+AppSec: 0                                           <- not a team here, but 0
+```
+
+An entry may be written `SOC: 0.5`, `SOC = 0.5`, `SOC 0.5`, `SOC - 0.5`,
+`SOC: 0.5 FTE`, as a bulleted or bold list item, or several to a line split by
+`|` or `;`. Team names match regardless of case, spacing and punctuation, so
+`SecEng` finds a team called `Sec Eng`. `-`, `n/a`, `none` and a blank value
+all mean the team is not needed.
+
+Where it draws the line is the teams you have:
+
+- **An entry for one of your teams must hold a usable number.** `SOC: TBC` is
+  an error, not a skip, because skipping it would drop that team's demand
+  without a word.
+- **A team you don't have is an error only if it is given FTE.** At 0 it needs
+  nothing and nothing is lost; at 0.5 it is demand that would vanish, so the
+  file is refused with one message naming each such team and the lines it is
+  on. Add the team, or correct the name in Jira.
+
+Errors on a Jira row name its issue key as well as its line, because one
+issue's Team Capacity spans several lines of the file. Jira's own date format,
+`01/Jan/27 12:00 AM`, is accepted alongside the forms a spreadsheet produces.
+
 ### Building the team columns
 
 The same tab converts a demand summary into the two rows the import needs, so
@@ -311,7 +361,8 @@ pytest -q
   database, plus end months, every route past a deadline, undo, and migrating
   a database from before end months existed.
 - `tests/test_import.py` — the CSV import, full dates, the optional `Deadline`
-  column, all-or-nothing failure, and the demand-summary converter.
+  column, all-or-nothing failure, Jira exports and the formats their Team
+  Capacity field arrives in, and the demand-summary converter.
 - `tests/test_security.py` — injection through every field the API accepts,
   path traversal, and input validation. See [SECURITY.md](SECURITY.md).
 - `tests/test_frontend.py` — static guards on `static/app.js`, pinning the

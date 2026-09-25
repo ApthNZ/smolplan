@@ -670,3 +670,220 @@ def test_stripping_quotes_does_not_excuse_a_bad_number(client):
     response = convert(client, 'GRC: "one"')
     assert response.status_code == 400
     assert "not a number" in " ".join(response.json()["detail"]["errors"])
+
+
+# --- Jira exports ------------------------------------------------------------
+
+JIRA_HEADER = (
+    "Summary,Issue key,Custom field (Target start),Custom field (Target end),"
+    "Custom field (Team Capacity)"
+)
+
+
+def capacity(*lines):
+    """A Team Capacity cell as Jira exports it: multi-line, so quoted."""
+    return '"' + "\n".join(lines) + '"'
+
+
+def jira_row(summary, key_, start, end, *lines):
+    return f"{summary},{key_},{start},{end},{capacity(*lines)}"
+
+
+def test_a_jira_export_imports(client):
+    """The shape of a real export: prose around the entries, a heading with an
+    empty value, the prose line written differently on each issue, zeroes for
+    teams this plan does not have, and Excel's full dates."""
+    response = post(client, "\n".join([
+        JIRA_HEADER,
+        jira_row("Firewall refresh", "SEC-101", "1/01/2027 0:00", "30/04/2027 0:00",
+                 "Teams required to resource: Networks / Platform / DevOps",
+                 "Estimated Team FTE:",
+                 "SOC: 0.5", "AppSec: 0", "GRC: 0", "TVM: 0"),
+        jira_row("Logging uplift", "SEC-102", "19/10/2026 0:00", "31/12/2026 0:00",
+                 "Teams required to resource: Architecture (Network) | Network (Core) | ",
+                 "Estimated Team FTE:",
+                 "SOC: 0", "AppSec: 0", "GRC: 0.75"),
+    ]) + "\n")
+    assert response.status_code == 200, response.json()
+    state = response.json()
+    assert state["import"]["created"] == ["Firewall refresh", "Logging uplift"]
+
+    teams = {t["name"]: t["id"] for t in state["teams"]}
+    firewall = by_name(state)["Firewall refresh"]
+    assert (firewall["reference"], firewall["start_month"], firewall["end_month"]) == (
+        "SEC-101", "2027-01", "2027-04")
+    assert demand_of(firewall, teams["SOC"]) == [(m, 50) for m in range(4)]
+    assert demand_of(firewall, teams["GRC"]) == []
+
+    logging = by_name(state)["Logging uplift"]
+    assert (logging["start_month"], logging["end_month"]) == ("2026-10", "2026-12")
+    assert demand_of(logging, teams["GRC"]) == [(m, 75) for m in range(3)]
+    assert demand_of(logging, teams["SOC"]) == []
+
+
+def test_a_jira_reimport_updates_in_place(client):
+    post(client, JIRA_HEADER + "\n" + jira_row("First", "SEC-1", "1/02/2027", "30/04/2027", "SOC: 1"))
+    again = post(client, JIRA_HEADER + "\n" + jira_row("Renamed", "SEC-1", "1/03/2027", "31/05/2027", "GRC: 2"))
+    assert again.status_code == 200, again.json()
+    assert again.json()["import"]["updated"] == ["Renamed"]
+    assert "First" not in by_name(again.json())
+
+
+def test_every_other_jira_column_is_ignored(client):
+    """Jira exports dozens of fields, some of them repeated (one Sprint column
+    per sprint). None of them is a team, and a repeat is not a duplicate that
+    matters."""
+    response = post(client,
+        "Issue Type,Summary,Issue key,Issue id,Status,Sprint,Sprint,"
+        "Custom field (Target start),Custom field (Target end),Custom field (Team Capacity)\n"
+        f"Epic,Thing,SEC-5,10001,To Do,S1,S2,1/02/2027,30/04/2027,{capacity('SOC: 1')}\n")
+    assert response.status_code == 200, response.json()
+    assert by_name(response.json())["Thing"]["reference"] == "SEC-5"
+
+
+def test_a_team_the_plan_lacks_is_an_error_only_with_fte(client):
+    """SecArch at 0 needs nothing, so nothing is lost by skipping it. At 0.75 it
+    is demand that would vanish, so the file is refused — once, naming every
+    line, rather than once per row."""
+    response = post(client, "\n".join([
+        JIRA_HEADER,
+        jira_row("A", "SEC-1", "2027-02", "2027-03", "SOC: 1", "SecArch: 0.75", "ISM: 0"),
+        jira_row("B", "SEC-2", "2027-02", "2027-03", "SOC: 1", "SecArch: 0.5", "ISM: 0.25"),
+        jira_row("C", "SEC-3", "2027-02", "2027-03", "SOC: 1", "SecArch: 0", "ISM: 0"),
+    ]) + "\n")
+    assert response.status_code == 400
+    errors = response.json()["detail"]["errors"]
+    assert len(errors) == 1, errors
+    assert "ISM (line 3)" in errors[0]
+    assert "SecArch (lines 2, 3)" in errors[0]
+    assert "Known teams are: GRC, SOC" in errors[0]
+    references = {i["reference"] for i in client.get("/api/state").json()["initiatives"]}
+    assert "SEC-3" not in references
+
+
+def test_a_row_whose_only_fte_is_for_an_unknown_team_is_not_also_called_empty(client):
+    response = post(client, JIRA_HEADER + "\n" + jira_row("A", "SEC-1", "2027-02", "2027-03", "SecArch: 1"))
+    errors = response.json()["detail"]["errors"]
+    assert len(errors) == 1 and "SecArch" in errors[0], errors
+
+
+def test_a_jira_row_with_no_fte_is_refused(client):
+    response = post(client, JIRA_HEADER + "\n" + jira_row(
+        "A", "SEC-1", "2027-02", "2027-03", "Estimated Team FTE:", "SOC: 0", "GRC: 0"))
+    assert response.json()["detail"]["errors"] == [
+        "Line 2 (SEC-1): no team has any FTE, so this initiative would need nothing."
+    ]
+
+
+def test_jira_errors_name_the_issue_and_the_field(client):
+    """A Jira row runs over several lines of the file, so its issue key is the
+    thing to find it by, and the columns are named as the file names them."""
+    response = post(client, JIRA_HEADER + "\n" + jira_row(
+        "A", "SEC-9", "someday", "2027-03", "SOC: TBC", "GRC: 1"))
+    assert response.json()["detail"]["errors"] == [
+        "Line 2 (SEC-9): Custom field (Target start) 'someday' is not a month in YYYY-MM form.",
+        "Line 2 (SEC-9), Custom field (Team Capacity): SOC: 'TBC' is not a number.",
+    ]
+
+
+def test_a_jira_export_without_team_capacity_says_so(client):
+    """Otherwise every Jira column would be reported as an unknown team."""
+    response = post(client,
+        "Summary,Issue key,Status,Custom field (Target start),Custom field (Target end)\n"
+        "A,SEC-1,To Do,1/02/2027,30/04/2027\n")
+    errors = response.json()["detail"]["errors"]
+    assert len(errors) == 1 and "Team Capacity" in errors[0], errors
+
+
+def test_a_jira_export_missing_a_field_names_it_in_jira_terms(client):
+    response = post(client,
+        "Summary,Issue key,Custom field (Target start),Custom field (Team Capacity)\n"
+        f"A,SEC-1,1/02/2027,{capacity('SOC: 1')}\n")
+    errors = response.json()["detail"]["errors"]
+    assert len(errors) == 1 and "Target end" in errors[0], errors
+
+
+def test_a_jira_export_may_carry_a_deadline(client):
+    response = post(client,
+        JIRA_HEADER + ",Custom field (Deadline)\n"
+        f"A,SEC-1,1/02/2027,30/04/2027,{capacity('SOC: 1')},30/06/2027\n")
+    assert response.status_code == 200, response.json()
+    assert by_name(response.json())["A"]["deadline_month"] == "2027-06"
+
+
+def test_jira_target_fields_need_not_be_custom_fields(client):
+    response = post(client,
+        "Summary,Issue key,Target start,Target end,Team Capacity\n"
+        f"A,SEC-1,1/02/2027,30/04/2027,{capacity('SOC: 1')}\n")
+    assert response.status_code == 200, response.json()
+
+
+TEAMS = [{"id": 1, "name": "SOC"}, {"id": 2, "name": "GRC"}, {"id": 3, "name": "Sec Eng"}]
+
+
+@pytest.mark.parametrize(
+    "text,demand",
+    [
+        ("SOC: 0.5\nGRC: 1", {1: 50, 2: 100}),
+        ("SOC:0.5\r\nGRC : 1", {1: 50, 2: 100}),         # spacing and Windows line ends
+        ("soc: 0.5", {1: 50}),                            # case
+        ("SOC = 0.5", {1: 50}),
+        ("SOC: 0.5 FTE", {1: 50}),                        # a unit
+        ("- SOC: 0.5\n* GRC: 1\n• Sec Eng: 2", {1: 50, 2: 100, 3: 200}),  # bullets
+        ("*SOC*: *0.5*", {1: 50}),                        # Jira bold
+        ("SOC 0.5\nGRC - 1", {1: 50, 2: 100}),            # no colon, but a team
+        ("SOC: 0.5 | GRC: 1", {1: 50, 2: 100}),           # one line
+        ("SOC: 0.5; GRC: 1", {1: 50, 2: 100}),
+        ("SecEng: 1", {3: 100}),                          # spacing inside a name
+        ("sec-eng: 1", {3: 100}),
+        ("SOC: -\nGRC: n/a\nSec Eng: none", {}),          # written-out nothing
+        ("SOC:\nGRC: 1", {2: 100}),                       # a blank value, as a blank cell
+        ('"SOC: 0.5"', {1: 50}),
+        ("", {}),
+        ("Teams: SOC, GRC\nNeeded by: Q3\nSOC: 1", {1: 100}),  # prose with colons
+        ("Ring SOC on 0800 1234", {}),                    # prose ending in a number
+    ],
+)
+def test_team_capacity_formats(text, demand):
+    got, problems, unknown = importer.parse_capacity(text, TEAMS)
+    assert (got, problems, unknown) == (demand, [], [])
+
+
+@pytest.mark.parametrize(
+    "text,problem",
+    [
+        ("SOC: TBC", "SOC: 'TBC' is not a number"),
+        ("SOC: -0.5", "SOC: -0.5 is negative"),           # a dash is not stripped from a number
+        ("SOC: 0,5", "SOC: '0,5' is not a number"),       # never silently 0
+        ("SOC: 0.125", "SOC: 0.125 has more than two decimal places"),
+        ("SOC: 1\nsoc: 1", "SOC is given more than once"),
+    ],
+)
+def test_team_capacity_problems(text, problem):
+    _, problems, _ = importer.parse_capacity(text, TEAMS)
+    assert problems == [problem]
+
+
+def test_team_capacity_reports_unknown_teams_given_fte():
+    _, problems, unknown = importer.parse_capacity("AppSec: 0\nTVM: 0.5\nTVM: 1\nOther words: 2", TEAMS)
+    assert problems == []
+    assert unknown == ["TVM", "Other words"]
+
+
+@pytest.mark.parametrize(
+    "written,month",
+    [
+        ("01/Jan/27 12:00 AM", "2027-01"),  # Jira's own export format
+        ("15/Sep/26 3:45 PM", "2026-09"),
+        ("15/Sept/2026", "2026-09"),
+        ("1 March 2027", "2027-03"),
+        ("31-Dec-26", "2026-12"),
+    ],
+)
+def test_a_date_with_a_named_month(written, month):
+    assert importer.month_of(written) == month
+
+
+@pytest.mark.parametrize("written", ["01/Foo/27", "32/Jan/27", "1/Ja/27"])
+def test_a_named_month_that_is_not_one_is_left_alone(written):
+    assert importer.month_of(written) == written
