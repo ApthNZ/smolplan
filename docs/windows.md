@@ -9,7 +9,7 @@ dependency ships a Windows wheel.
 
 ## What you need
 
-- **Python 3.10 or newer.** The test suite is run on both 3.10 and 3.14, so
+- **Python 3.11 or newer.** The test suite is run on both 3.11 and 3.14, so
   anything in that range is fine.
 - **Git**, optionally. You can download the code as a zip instead.
 

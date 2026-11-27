@@ -62,7 +62,7 @@ def test_ci_tests_the_python_the_image_ships():
     image = re.search(r"FROM python:(\d+\.\d+)", (ROOT / "Dockerfile").read_text()).group(1)
     for name in ("ci.yml", "dependabot-automerge.yml"):
         workflow = (WORKFLOWS / name).read_text()
-        assert image in workflow and "3.10" in workflow, name
+        assert image in workflow and "3.11" in workflow, name
 
 
 def test_ci_installs_nothing_unpinned():

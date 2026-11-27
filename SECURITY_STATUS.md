@@ -67,7 +67,7 @@ oversight.
 - Dependencies are pinned in `requirements.txt` and kept current by Dependabot
   with test-gated auto-merge. The automerge job holds a write token, so its
   actions are pinned to commits, it checks the PR's author and not only the
-  actor, it tests on Python 3.10 and on the image's 3.14, and it builds and
+  actor, it tests on Python 3.11 and on the image's 3.14, and it builds and
   health-checks the image before merging — a docker bump is judged by something
   that ran it.
 - The database lives on a bind mount at `./data`, outside the image.

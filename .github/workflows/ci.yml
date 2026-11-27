@@ -30,7 +30,7 @@ jobs:
         # The oldest Python this runs on, and the one the image ships. Behaviour
         # that differs between them — the Unicode tables text cleaning reads,
         # for one — would otherwise only ever be tested on the older.
-        python-version: ["3.10", "3.14"]
+        python-version: ["3.11", "3.14"]
     steps:
       # Actions are pinned to a commit, with the version as a comment for
       # Dependabot to move forward. A tag can be re-pointed; a commit cannot.

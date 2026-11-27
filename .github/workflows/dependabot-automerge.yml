@@ -50,13 +50,13 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: |
-            3.10
+            3.11
             3.14
 
       # Both the oldest supported Python and the one the image ships, as ci.yml.
       - name: Install dependencies and run tests
         run: |
-          for version in 3.10 3.14; do
+          for version in 3.11 3.14; do
             python$version -m venv "/tmp/venv-$version"
             py="/tmp/venv-$version/bin/python"
             "$py" -m pip install --upgrade pip
