@@ -21,6 +21,13 @@ updates:
     open-pull-requests-limit: 3
     commit-message:
       prefix: "deps(docker)"
+    # A new Python minor is a deliberate upgrade that moves the CI pins and
+    # this image together, not a routine bump. Left to itself, Dependabot
+    # jumps the image to a new minor on day one and ships a Python CI never
+    # ran. Patch tags and digests still flow.
+    ignore:
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
